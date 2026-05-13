@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scorched Earth 2000 HTML Port</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="applet-shell">
+    <section class="applet" id="applet">
+      <div class="topbar">
+        <span>Scorched Earth 2000 v1.1, 5/11/2026</span>
+        <span id="turnLabel"></span>
+      </div>
+      <canvas id="field" width="800" height="600" aria-label="Scorched Earth 2000 game field"></canvas>
+      <form class="game-chat-form hidden" id="gameChatForm">
+        <input id="gameChatInput" maxlength="180" autocomplete="off">
+        <button>Say</button>
+      </form>
+      <div class="status" id="status"></div>
+    </section>
+
+    <aside class="panel s-window">
+      <div class="window-title">SCORCH 2000</div>
+      <div class="group players" id="players"></div>
+
+      <div class="buttons">
+        <button id="system">System</button>
+        <button id="inventory">Inventory</button>
+      </div>
+
+      <div class="group">
+        <input id="angle" type="hidden" value="30">
+        <input id="power" type="hidden" value="300">
+        <span class="wind-row">Wind: <strong id="windOut">0</strong></span>
+      </div>
+
+      <div class="group weapon-choice">
+        <select id="weaponSelect"></select>
+      </div>
+
+      <div class="readout">
+        <span>Ammo:</span><strong id="ammoOut">999</strong>
+        <span>Power:</span><strong id="powerReadout">300</strong>
+        <span>Angle:</span><strong id="angleReadout">30</strong>
+      </div>
+
+      <div class="keypad">
+        <span></span><button id="powerUp">+</button><span></span>
+        <button id="angleDown">&lt;</button><button id="powerDown">-</button><button id="angleUp">&gt;</button>
+      </div>
+
+      <div class="buttons">
+        <button id="fire">fire</button>
+        <button id="newRound">New Round</button>
+      </div>
+      <div class="round-readout" id="roundOut">Round 1 out of 1</div>
+    </aside>
+  </main>
+
+  <div class="floating-window hidden" id="systemMenu">
+    <div class="system-window s-window">
+      <div class="window-title">System Menu</div>
+      <div class="system-buttons">
+        <button id="statistics">Statistics</button>
+        <button id="massKill">Mass kill</button>
+        <button id="multiplayer">Multiplayer</button>
+        <button>Edit profile</button>
+        <button id="about">About Scorch</button>
+        <button>On-line help</button>
+        <button>Leave Scorch</button>
+        <button id="closeSystem">Close this menu</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="floating-window hidden" id="statsBox">
+    <div class="stats-window s-window">
+      <div class="window-title">Players Statistics</div>
+      <div class="stats-panel">
+        <div class="stats-grid stats-head">
+          <span>Player Name</span>
+          <span>Kills</span>
+          <span>Gain</span>
+          <span>Overall Kills</span>
+          <span>Overall Gain</span>
+        </div>
+        <div id="statsRows"></div>
+      </div>
+      <div class="about-buttons">
+        <button id="closeStats">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="floating-window hidden" id="debugBox">
+    <div class="debug-window s-window">
+      <div class="window-title">Debug Console</div>
+      <pre class="debug-output" id="debugOutput"></pre>
+      <div class="about-buttons">
+        <button id="closeDebug">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="floating-window hidden" id="multiplayerBox">
+    <div class="multiplayer-window s-window">
+      <div class="window-title">Multiplayer</div>
+      <div class="multiplayer-panel">
+        <label for="multiplayerName">Name</label>
+        <input id="multiplayerName" value="Player">
+        <label for="multiplayerTank">Tank</label>
+        <select id="multiplayerTank" class="tank-select-native">
+          <option value="0">Tank 1</option>
+          <option value="1">Tank 2</option>
+          <option value="2">Tank 3</option>
+          <option value="3">Tank 4</option>
+          <option value="4">Tank 5</option>
+          <option value="5">Tank 6</option>
+        </select>
+        <div class="tank-picker" data-tank-picker="multiplayerTank"></div>
+        <label for="multiplayerRoom">Game</label>
+        <input id="multiplayerRoom" maxlength="6">
+        <label for="multiplayerResolution">Resolution</label>
+        <select id="multiplayerResolution">
+          <option value="640x480">640x480</option>
+          <option value="800x600" selected>800x600</option>
+          <option value="1024x768">1024x768</option>
+        </select>
+        <label for="multiplayerWind">Wind</label>
+        <select id="multiplayerWind">
+          <option value="0">None</option>
+          <option value="5">Light</option>
+          <option value="10" selected>Normal</option>
+          <option value="20">Strong</option>
+        </select>
+        <label for="multiplayerCash">Initial cash</label>
+        <input id="multiplayerCash" type="number" min="0" max="999999" step="1000" value="50000">
+        <label for="multiplayerRounds">Rounds</label>
+        <input id="multiplayerRounds" type="number" min="1" max="99" step="1" value="3">
+        <div class="multiplayer-actions">
+          <button id="createRoom">Create Game</button>
+          <button id="joinRoom">Join</button>
+          <button id="startRoom">Start</button>
+        </div>
+        <div class="multiplayer-actions multiplayer-ai-actions">
+          <button data-add-ai="0">Add Shooter</button>
+          <button data-add-ai="1">Add Cyborg</button>
+          <button data-add-ai="2">Add Killer</button>
+        </div>
+        <div class="multiplayer-status" id="multiplayerStatus">Offline</div>
+        <div class="multiplayer-games" id="multiplayerGames"></div>
+        <div class="multiplayer-roster" id="multiplayerRoster"></div>
+        <div class="multiplayer-chat-log" id="multiplayerChatLog"></div>
+        <form class="multiplayer-chat-form" id="multiplayerChatForm">
+          <input id="multiplayerChatInput" maxlength="180" autocomplete="off">
+          <button>Say</button>
+        </form>
+      </div>
+      <div class="about-buttons">
+        <button id="singlePlayerMode">Single Player</button>
+        <button id="closeMultiplayer">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="floating-window hidden" id="inventoryBox">
+    <div class="inventory-window s-window">
+      <div class="window-title">Inventory</div>
+      <div class="inventory-panel" id="inventoryRows"></div>
+      <div class="about-buttons">
+        <button id="closeInventory">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="floating-window hidden" id="shopBox">
+    <div class="shop-window s-window">
+      <div class="window-title">Scorched Earth Shop</div>
+      <div class="shop-cash" id="shopCash"></div>
+      <div class="shop-panel">
+        <div class="shop-grid shop-head">
+          <span>item</span><span>price</span><span>amount</span><span>order</span><span></span>
+        </div>
+        <div id="shopRows"></div>
+      </div>
+      <div class="about-buttons">
+        <button id="confirmShop">Confirm order</button>
+        <button id="cancelShop">Cancel order</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="floating-window hidden" id="roundEndBox">
+    <div class="stats-window s-window">
+      <div class="window-title">Players Statistics</div>
+      <div class="stats-panel">
+        <div class="stats-grid stats-head">
+          <span>Player Name</span><span>Kills</span><span>Gain</span><span>Overall Kills</span><span>Overall Gain</span>
+        </div>
+        <div id="roundEndRows"></div>
+      </div>
+      <div class="about-buttons">
+        <button id="playNextRound">Play next round</button>
+        <button id="goShopping">Go shopping</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="floating-window hidden" id="roundSetup">
+    <div class="setup-window s-window">
+      <div class="window-title">New Round</div>
+      <div class="setup-controls">
+        <label for="resolutionSelect">Resolution</label>
+        <select id="resolutionSelect">
+          <option value="640x480">640x480</option>
+          <option value="800x600" selected>800x600</option>
+          <option value="1024x768">1024x768</option>
+        </select>
+        <label for="playerCount">Players</label>
+        <select id="playerCount">
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4" selected>4</option>
+          <option value="5">5</option>
+          <option value="6">6</option>
+          <option value="7">7</option>
+          <option value="8">8</option>
+        </select>
+        <label for="aiCount">AI</label>
+        <select id="aiCount">
+          <option value="0">0</option>
+          <option value="1">1</option>
+          <option value="2" selected>2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="5">5</option>
+          <option value="6">6</option>
+          <option value="7">7</option>
+        </select>
+        <label for="tankSelect">Tank</label>
+        <select id="tankSelect" class="tank-select-native">
+          <option value="0">Tank 1</option>
+          <option value="1">Tank 2</option>
+          <option value="2">Tank 3</option>
+          <option value="3">Tank 4</option>
+          <option value="4">Tank 5</option>
+          <option value="5">Tank 6</option>
+        </select>
+        <div class="tank-picker" data-tank-picker="tankSelect"></div>
+      </div>
+      <div class="about-buttons">
+        <button id="startRound">Start round</button>
+        <button id="cancelRoundSetup">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="floating-window hidden" id="aboutBox">
+    <div class="about-window s-window">
+      <div class="window-title">About Scorched Earth 2000</div>
+      <div class="credits-panel">
+        <div class="credits-scroll">
+          <div class="credit yellow">Scorched Earth 2000</div>
+          <div class="credit white">v1.1, 5/11/2026</div>
+          <div class="credit cyan">by KAOS Software Team</div>
+          <br>
+          <div class="credit cyan">JavaScript Port</div>
+          <div class="credit gray">ChatGPT 5.5</div>
+          <br>
+          <div class="credit cyan">Project Lead</div>
+          <div class="credit gray">Hei C. Ng (xixi)</div>
+          <br>
+          <div class="credit cyan">Development Lead</div>
+          <div class="credit gray">Alexander Rasin</div>
+          <br>
+          <div class="credit cyan">Client Programming</div>
+          <div class="credit gray">Mikhail Kruk</div>
+          <br>
+          <div class="credit cyan">Weapons Programming</div>
+          <div class="credit gray">Nathan Roslavker</div>
+          <br>
+          <div class="credit cyan">Physics</div>
+          <div class="credit gray">Ramya Ramesh</div>
+          <br>
+          <div class="credit cyan">Documentation</div>
+          <div class="credit gray">Kapil Mehra</div>
+          <br>
+          <div class="credit cyan">Quality Assurance</div>
+          <div class="credit gray">John Langton</div>
+          <br>
+          <div class="credit white">Special Thanks</div>
+          <br>
+          <div class="credit gray">Wendell Hicken</div>
+          <div class="credit cyan">for original Scorched Earth</div>
+          <br>
+          <div class="credit gray">Stanislav Malyshev (Baggins)</div>
+          <div class="credit cyan">for help with networking</div>
+          <br>
+          <div class="credit gray">Boris Kruk</div>
+          <div class="credit cyan">for hints on color matching</div>
+          <br>
+          <div class="credit gray">Galsla</div>
+          <div class="credit cyan">for Galsla mode</div>
+          <br>
+          <div class="credit gray">Roger Waters</div>
+          <div class="credit cyan">for the name of our team</div>
+          <br>
+          <div class="credit cyan">and</div>
+          <div class="credit white">dkw for protecting our files</div>
+        </div>
+      </div>
+      <div class="about-buttons">
+        <button id="closeAbout">OK</button>
+        <button id="license">License</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="floating-window hidden" id="licenseBox">
+    <div class="license-window s-window">
+      <div class="window-title">License</div>
+      <iframe class="license-frame" data-src="./COPYING" title="GNU General Public License"></iframe>
+      <button id="closeLicense">OK</button>
+    </div>
+  </div>
+
+  <script src="./scorch.js"></script>
+</body>
+</html>

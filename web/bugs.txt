@@ -1,0 +1,9 @@
+single player mode after mass kill player doesn't get right of turn, it just sits there with controls disabled.
+game lifecycle is not clear. when game ends it should disappear from the set of games etc. when player disconnects they should disappear from the game (their tank explodes)
+something is wrong with desyncs and i think it got worse -- every time we get to a tank death it is differnt on the 2 clients I'm testing with and game hangs.
+btw when server detects desync and stops the game it should send an announcement to the players via chat.
+player profiles should persist on the server, you should be able to log in as guest or as a registered user (SAME as original... why do i have to beg to make this port be functionally equivalent?)
+if a game is started with cash, we should have an option to spend it before the first round
+in game statistics window shows 0s even though there are kills
+mass kill performed by one of the players is not traferred to the others (causing a desync on the next roudn since other players don't expode)
+galsla mode!
