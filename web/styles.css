@@ -394,6 +394,30 @@ select {
   border-color: #fff #777 #777 #fff;
 }
 
+.waiting-window {
+  width: 300px;
+  box-sizing: border-box;
+  padding: 7px;
+  color: #000;
+  font-family: Dialog, Arial, Helvetica, sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  background: #c0c0c0;
+  border: 3px solid;
+  border-color: #fff #777 #777 #fff;
+}
+
+.waiting-body {
+  position: relative;
+  z-index: 2;
+  padding: 12px 12px 14px;
+  line-height: 18px;
+}
+
+#waitingPlayers {
+  margin-top: 8px;
+}
+
 .inventory-window {
   width: 360px;
   box-sizing: border-box;

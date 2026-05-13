@@ -2195,6 +2195,7 @@ class MultiplayerSession {
     this.games = [];
     this.settings = { resolution: "800x600", maxWind: 10, initialCash: DEFAULT_INITIAL_CASH, rounds: 3, currentRound: 0 };
     this.activeTurnId = 0;
+    this.gameOver = false;
     this.chatLog = [];
     this.lastChecksum = "";
   }
@@ -2345,8 +2346,12 @@ class MultiplayerSession {
     this.send({ type: "fire", playerId: this.game.active, activeTurnId: this.activeTurnId, angle: player.angle, power: player.power, weapon: this.game.weapon });
   }
   massKill() {
-    if (!this.isLocalTurn() || this.game.animating) return;
-    this.send({ type: "mass-kill", playerId: this.game.active, activeTurnId: this.activeTurnId });
+    if (!this.started || this.game.animating) return;
+    if (this.clientId !== this.hostId) {
+      this.status("Only the game master can mass kill.");
+      return;
+    }
+    this.send({ type: "mass-kill" });
   }
   sendChat(text) {
     this.send({ type: "chat", text });
@@ -2419,6 +2424,7 @@ class MultiplayerSession {
     }
     if (message.type === "start") {
       this.started = true;
+      this.gameOver = false;
       this.room = message.game;
       this.activeTurnId = Number(message.activeTurnId ?? 0);
       initialShopOpened = false;
@@ -2434,14 +2440,32 @@ class MultiplayerSession {
     }
     if (message.type === "round-start") {
       this.started = true;
+      this.gameOver = false;
       this.activeTurnId = Number(message.activeTurnId ?? 0);
       this.applyIdentity(message);
       this.applySettings(message);
       this.syncRoster(message.players);
+      hideWaitingBox();
       document.getElementById("roundEndBox").classList.add("hidden");
       this.game.startMultiplayerRound(message);
       this.status(`Game ${this.room} round ${this.settings.currentRound}/${this.settings.rounds}.`);
       this.roster();
+      return;
+    }
+    if (message.type === "round-waiting" && this.started) {
+      showWaitingBox(message.readyClientIds, message.waiting);
+      return;
+    }
+    if (message.type === "round-ready-complete" && this.started) {
+      hideWaitingBox();
+      this.activeTurnId = Number(message.activeTurnId ?? this.activeTurnId);
+      this.game.active = Number(message.active ?? this.game.active);
+      this.syncRoster(message.players);
+      const active = this.game.players[this.game.active];
+      this.status(`Game ${this.room} round ${this.settings.currentRound}/${this.settings.rounds}.`);
+      this.game.render(active ? `${active.name}'s turn.` : "Round ready.");
+      setControlsDisabled(false);
+      this.game.scheduleAiTurn();
       return;
     }
     if (message.type === "chat") {
@@ -2514,13 +2538,19 @@ class MultiplayerSession {
       this.game.render(winner ? `${winner.name} wins round ${this.settings.currentRound}.` : `Round ${this.settings.currentRound} ended.`);
       setControlsDisabled(true);
       if (message.final) {
+        hideWaitingBox();
         this.started = false;
-        this.status(`Game ${this.room} complete.`);
-        setControlsDisabled(false);
-        showRoundEnd();
+        this.gameOver = true;
+        this.room = "";
+        this.players = [];
+        this.status(`Game complete. ${winner ? `${winner.name} was last standing.` : "No tanks survived."}`);
+        this.roster();
+        this.gameList();
+        setControlsDisabled(true);
+        showRoundEnd({ final: true, winner });
       } else {
         this.status(`Round ${this.settings.currentRound}/${this.settings.rounds} complete. Shop or continue when ready.`);
-        showRoundEnd();
+        showRoundEnd({ final: false, winner });
       }
       return;
     }
@@ -2654,7 +2684,7 @@ function roundReadoutText() {
 }
 
 function closeTopDialog() {
-  for (const id of ["licenseBox", "aboutBox", "inventoryBox", "shopBox", "roundEndBox", "statsBox", "debugBox", "multiplayerBox", "systemMenu", "roundSetup"]) {
+  for (const id of ["licenseBox", "aboutBox", "inventoryBox", "shopBox", "roundEndBox", "waitingBox", "statsBox", "debugBox", "multiplayerBox", "systemMenu", "roundSetup"]) {
     const element = document.getElementById(id);
     if (!element.classList.contains("hidden")) {
       element.classList.add("hidden");
@@ -2662,6 +2692,22 @@ function closeTopDialog() {
     }
   }
   return false;
+}
+
+function showWaitingBox(readyClientIds = [], waiting = []) {
+  const net = globalThis.multiplayerSession;
+  const ready = new Set(readyClientIds);
+  const box = document.getElementById("waitingBox");
+  if (!net?.clientId || !ready.has(net.clientId) || !waiting.length) {
+    box.classList.add("hidden");
+    return;
+  }
+  document.getElementById("waitingPlayers").innerHTML = `Waiting for:<br>${waiting.map((player) => escapeHtml(player.name)).join("<br>")}`;
+  box.classList.remove("hidden");
+}
+
+function hideWaitingBox() {
+  document.getElementById("waitingBox").classList.add("hidden");
 }
 
 function showStatistics() {
@@ -2697,8 +2743,19 @@ function statsRowsHtml(players) {
   `).join("");
 }
 
-function showRoundEnd() {
+function showRoundEnd(options = {}) {
   game.captureStatsSnapshot();
+  const final = !!options.final;
+  const title = document.querySelector("#roundEndBox .window-title");
+  if (title) {
+    title.textContent = final
+      ? `Game Over${options.winner ? ` - ${options.winner.name} was last standing` : ""}`
+      : "Players Statistics";
+  }
+  const nextButton = document.getElementById("playNextRound");
+  const shopButton = document.getElementById("goShopping");
+  nextButton.textContent = final ? "Back to games" : "Play next round";
+  shopButton.classList.toggle("hidden", final);
   document.getElementById("roundEndRows").innerHTML = statsRowsHtml(game.players);
   document.getElementById("roundEndBox").classList.remove("hidden");
 }
@@ -2915,9 +2972,9 @@ function confirmShop() {
   shopPlayer = null;
   if (multiplayer.started) {
     multiplayer.sendShopUpdate(player);
-    if (mode === "between-round") {
+    if (mode === "between-round" || mode === "initial") {
       multiplayer.readyForNextRound();
-      game.render("Shopping complete. Waiting for next round...");
+      game.render(mode === "initial" ? "Shopping complete. Waiting for players..." : "Shopping complete. Waiting for next round...");
       setControlsDisabled(true);
     } else {
       game.render("Shopping complete.");
@@ -2934,9 +2991,9 @@ function cancelShop() {
   shopMode = "initial";
   shopPlayer = null;
   if (multiplayer.started) {
-    if (mode === "between-round") {
+    if (mode === "between-round" || mode === "initial") {
       multiplayer.readyForNextRound();
-      game.render("Shopping skipped. Waiting for next round...");
+      game.render(mode === "initial" ? "Shopping skipped. Waiting for players..." : "Shopping skipped. Waiting for next round...");
       setControlsDisabled(true);
     } else {
       game.render("Shopping skipped.");
@@ -3023,6 +3080,7 @@ document.getElementById("angleUp").addEventListener("click", () => nudgeAngle(-1
 document.getElementById("powerUp").addEventListener("click", () => nudgePower(10));
 document.getElementById("powerDown").addEventListener("click", () => nudgePower(-10));
 document.getElementById("system").addEventListener("click", () => {
+  document.getElementById("massKill").disabled = multiplayer.started && multiplayer.clientId !== multiplayer.hostId;
   document.getElementById("systemMenu").classList.remove("hidden");
 });
 document.getElementById("multiplayer").addEventListener("click", () => {
@@ -3135,7 +3193,13 @@ document.getElementById("cancelShop").addEventListener("click", () => {
 });
 document.getElementById("playNextRound").addEventListener("click", () => {
   document.getElementById("roundEndBox").classList.add("hidden");
-  if (multiplayer.started) {
+  if (multiplayer.gameOver) {
+    multiplayer.gameOver = false;
+    multiplayer.roster();
+    multiplayer.gameList();
+    document.getElementById("multiplayerBox").classList.remove("hidden");
+    setControlsDisabled(true);
+  } else if (multiplayer.started) {
     multiplayer.readyForNextRound();
     game.render("Waiting for next round...");
     setControlsDisabled(true);

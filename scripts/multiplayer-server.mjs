@@ -179,6 +179,9 @@ function createRoom(client, payload) {
     turnReports: new Map(),
     turnReportTimer: null,
     roundReady: new Set(),
+    initialReady: new Set(),
+    initialPreparing: false,
+    massKillPendingBy: null,
     lastLateAimKey: "",
     roundEnding: false
   };
@@ -235,6 +238,9 @@ function startRoom(client) {
   room.turnId = 0;
   room.turnReports = new Map();
   room.roundReady = new Set();
+  room.initialReady = new Set();
+  room.initialPreparing = room.initialCash > 0;
+  room.massKillPendingBy = null;
   room.lastLateAimKey = "";
   if (room.turnReportTimer) clearTimeout(room.turnReportTimer);
   room.turnReportTimer = null;
@@ -254,6 +260,9 @@ function startNextRound(room) {
   room.turnId = 0;
   room.turnReports = new Map();
   room.roundReady = new Set();
+  room.initialReady = new Set();
+  room.initialPreparing = false;
+  room.massKillPendingBy = null;
   room.lastLateAimKey = "";
   if (room.turnReportTimer) clearTimeout(room.turnReportTimer);
   room.turnReportTimer = null;
@@ -265,7 +274,7 @@ function startNextRound(room) {
 
 function relayAim(client, payload) {
   const room = client.room;
-  if (!room?.started || room.roundEnding) return;
+  if (!room?.started || room.roundEnding || room.initialPreparing) return;
   const playerId = Number(payload.playerId ?? room.participants.indexOf(participantForClient(room, client)));
   const activeTurnId = Number(payload.activeTurnId ?? room.activeTurnId);
   if (activeTurnId !== room.activeTurnId) {
@@ -291,7 +300,7 @@ function relayAim(client, payload) {
 
 function relayFire(client, payload) {
   const room = client.room;
-  if (!room?.started || room.roundEnding) return;
+  if (!room?.started || room.roundEnding || room.initialPreparing) return;
   const playerId = Number(payload.playerId ?? room.participants.indexOf(participantForClient(room, client)));
   const activeTurnId = Number(payload.activeTurnId ?? room.activeTurnId);
   if (activeTurnId !== room.activeTurnId) {
@@ -338,19 +347,32 @@ function beginTurnReport(room) {
 
 function relayMassKill(client, payload) {
   const room = client.room;
-  if (!room?.started || room.roundEnding) return;
-  const playerId = Number(payload.playerId ?? room.participants.indexOf(participantForClient(room, client)));
-  const activeTurnId = Number(payload.activeTurnId ?? room.activeTurnId);
-  if (activeTurnId !== room.activeTurnId) {
-    log("game.mass_kill_late", `game=${room.code} from=${client.name || client.id} player=${playerId} active=${room.active} activeTurn=${activeTurnId}/${room.activeTurnId}`);
+  if (!room?.started || room.roundEnding || room.initialPreparing) return;
+  if (client.id !== room.hostId) {
+    log("game.mass_kill_ignored", `game=${room.code} from=${client.name || client.id} reason=not_host`);
     return;
   }
-  if (playerId !== room.active || !activeAuthorized(room, client, playerId)) {
-    log("game.mass_kill_ignored", `game=${room.code} from=${client.name || client.id} player=${playerId} active=${room.active} activeTurn=${activeTurnId}`);
+  if (room.massKillPendingBy) return;
+  if (!room.turnReportTimer && activeAuthorized(room, client, room.active)) {
+    beginMassKill(room, client);
     return;
   }
+  room.massKillPendingBy = client.id;
+  log("game.mass_kill_scheduled", `game=${room.code} by=${client.name || client.id} after_active=${room.active}`);
+  broadcast(room, {
+    type: "chat",
+    playerId: null,
+    name: "Server",
+    text: "<Server> Mass kill scheduled by game master.",
+    at: Date.now()
+  });
+}
+
+function beginMassKill(room, client) {
+  room.massKillPendingBy = null;
+  const playerId = room.active;
   const turnId = beginTurnReport(room);
-  log("game.mass_kill", `game=${room.code} turn=${turnId} player=${playerId}`);
+  log("game.mass_kill", `game=${room.code} turn=${turnId} by=${client.name || client.id} active=${playerId}`);
   broadcast(room, {
     type: "mass-kill",
     turnId,
@@ -444,8 +466,16 @@ function advanceTurn(client, payload) {
     if (room.currentRound >= room.rounds) {
       room.started = false;
       log("game.end", `game=${room.code} rounds=${room.rounds}`);
+      games.delete(room.code);
+      for (const member of room.clients) member.room = null;
+      room.clients = [];
       broadcastGameList();
     }
+    return;
+  }
+  if (room.massKillPendingBy) {
+    const master = room.clients.find((member) => member.id === room.massKillPendingBy);
+    beginMassKill(room, master || client);
     return;
   }
   let next = room.active;
@@ -492,11 +522,39 @@ function relayChat(client, payload) {
 
 function relayRoundReady(client) {
   const room = client.room;
-  if (!room?.started || !room.roundEnding || room.currentRound >= room.rounds) return;
+  if (!room?.started) return;
+  if (room.initialPreparing) {
+    room.initialReady.add(client.id);
+    const waiting = waitingClients(room, room.initialReady);
+    log("game.initial_ready", `game=${room.code} client=${client.name || client.id} waiting=${waiting.map((member) => member.name || member.id).join(",") || "none"}`);
+    if (!waiting.length) {
+      room.initialPreparing = false;
+      room.initialReady = new Set();
+      broadcast(room, { type: "round-ready-complete", active: room.active, activeTurnId: room.activeTurnId, players: roomPlayers(room) });
+    } else {
+      broadcastRoundWaiting(room, room.initialReady, waiting);
+    }
+    return;
+  }
+  if (!room.roundEnding || room.currentRound >= room.rounds) return;
   room.roundReady.add(client.id);
-  const waiting = room.clients.filter((member) => !room.roundReady.has(member.id)).map((member) => member.name || member.id);
-  log("game.round_ready", `game=${room.code} client=${client.name || client.id} waiting=${waiting.join(",") || "none"}`);
+  const waiting = waitingClients(room, room.roundReady);
+  log("game.round_ready", `game=${room.code} client=${client.name || client.id} waiting=${waiting.map((member) => member.name || member.id).join(",") || "none"}`);
   if (!waiting.length) startNextRound(room);
+  else broadcastRoundWaiting(room, room.roundReady, waiting);
+}
+
+function waitingClients(room, readySet) {
+  return room.clients.filter((member) => !readySet.has(member.id));
+}
+
+function broadcastRoundWaiting(room, readySet, waitingClientsList) {
+  broadcast(room, {
+    type: "round-waiting",
+    readyClientIds: [...readySet],
+    waiting: waitingClientsList
+      .map((member) => ({ clientId: member.id, name: member.name || `Player ${member.id}` }))
+  });
 }
 
 function relayShop(client, payload) {
