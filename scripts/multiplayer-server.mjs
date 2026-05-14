@@ -6,9 +6,20 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../web");
 const port = Number(process.env.PORT || 4174);
+const statsHtmlPath = path.resolve(process.env.SCORCH_STATS_HTML || process.env.STATS_HTML || path.join(root, "stats.html"));
 const games = new Map();
 const clients = new Set();
+const statsByName = new Map();
 let nextClientId = 1;
+let statsWritePending = false;
+const serverMetrics = {
+  maxConcurrentGames: 0,
+  maxConcurrentPlayers: 0,
+  longestGameMs: 0,
+  longestGameLabel: "",
+  longestGameStartedAt: null,
+  longestGameEndedAt: null
+};
 
 const mime = new Map([
   ["", "text/plain; charset=utf-8"],
@@ -21,6 +32,281 @@ const mime = new Map([
 function log(event, details = "") {
   const stamp = new Date().toISOString();
   console.log(`[${stamp}] ${event}${details ? ` ${details}` : ""}`);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;"
+  }[char]));
+}
+
+function statKey(name) {
+  return String(name || "Player").trim().toLowerCase();
+}
+
+function globalStatFor(name) {
+  const displayName = String(name || "Player").trim() || "Player";
+  const key = statKey(displayName);
+  if (!statsByName.has(key)) {
+    statsByName.set(key, {
+      name: displayName,
+      kills: 0,
+      gain: 0,
+      games: 0,
+      wins: 0,
+      lastSeen: null
+    });
+  }
+  const entry = statsByName.get(key);
+  entry.name = displayName;
+  entry.lastSeen = new Date().toISOString();
+  return entry;
+}
+
+function recordStatsDelta(participant, stat) {
+  if (!participant || participant.kind !== "human") return false;
+  const kills = Number(stat.kills) || 0;
+  const gain = Number(stat.gain) || 0;
+  const overallKills = Number(stat.overallKills) || kills;
+  const overallGain = Number(stat.overallGain) || gain;
+  const previousKills = Number(participant.overallKills) || 0;
+  const previousGain = Number(participant.overallGain) || 0;
+  const entry = globalStatFor(participant.name);
+  entry.kills += overallKills - previousKills;
+  entry.gain += overallGain - previousGain;
+  participant.kills = kills;
+  participant.gain = gain;
+  participant.overallKills = overallKills;
+  participant.overallGain = overallGain;
+  return true;
+}
+
+function statWeight(stat) {
+  return Math.abs(Number(stat?.gain) || 0) +
+    Math.abs(Number(stat?.kills) || 0) * 100000 +
+    Math.abs(Number(stat?.overallGain) || 0) +
+    Math.abs(Number(stat?.overallKills) || 0) * 100000;
+}
+
+function mergedTurnStats(turnReports) {
+  const merged = new Map();
+  for (const report of turnReports.values()) {
+    if (!Array.isArray(report.payload?.stats)) continue;
+    for (const stat of report.payload.stats) {
+      const id = Number(stat.id);
+      if (!Number.isInteger(id)) continue;
+      const current = merged.get(id);
+      if (!current || statWeight(stat) > statWeight(current)) merged.set(id, stat);
+    }
+  }
+  return [...merged.values()];
+}
+
+function mergeTurnInventory(room, turnReports) {
+  let changed = false;
+  for (const report of turnReports.values()) {
+    if (!Array.isArray(report.payload?.inventory)) continue;
+    for (const item of report.payload.inventory) {
+      const participant = room.participants[item.id];
+      if (!participant) continue;
+      if (Array.isArray(item.weapons)) {
+        participant.weapons = item.weapons.map((value) => Math.max(0, Number(value) || 0));
+        changed = true;
+      }
+      if (Array.isArray(item.items)) {
+        participant.items = item.items.map((value) => Math.max(0, Number(value) || 0));
+        changed = true;
+      }
+      if (item.cash != null) {
+        participant.cash = Math.max(0, Number(item.cash) || 0);
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+function recordGameFinished(room, winnerId) {
+  let changed = false;
+  for (const participant of room.participants) {
+    if (participant.kind !== "human") continue;
+    const entry = globalStatFor(participant.name);
+    entry.games += 1;
+    if (room.participants[winnerId] === participant) entry.wins += 1;
+    changed = true;
+  }
+  if (changed) scheduleStatsWrite();
+}
+
+function statsRows() {
+  return [...statsByName.values()]
+    .sort((a, b) => b.gain - a.gain || b.kills - a.kills || a.name.localeCompare(b.name));
+}
+
+function currentGameRows() {
+  return [...games.values()]
+    .sort((a, b) => a.code.localeCompare(b.code))
+    .map((game) => {
+      const humanCount = game.participants.filter((entry) => entry.kind === "human").length;
+      const aiCount = game.participants.filter((entry) => entry.kind === "ai").length;
+      const status = game.started
+        ? `Round ${game.currentRound} of ${game.rounds}`
+        : "Waiting for players";
+      const label = game.private ? "Private game" : `${game.code}${game.title ? ` - ${game.title}` : ""}`;
+      return { game, label, status, humanCount, aiCount };
+    });
+}
+
+function serverSummary() {
+  const gameEntries = [...games.values()];
+  const longestOpenGameMs = gameEntries.reduce((longest, game) => {
+    if (!game.startedAt || !game.started) return longest;
+    return Math.max(longest, Date.now() - game.startedAt);
+  }, 0);
+  const humans = gameEntries.reduce((sum, game) => sum + game.participants.filter((entry) => entry.kind === "human").length, 0);
+  const ais = gameEntries.reduce((sum, game) => sum + game.participants.filter((entry) => entry.kind === "ai").length, 0);
+  return {
+    games: gameEntries.length,
+    waiting: gameEntries.filter((game) => !game.started).length,
+    playing: gameEntries.filter((game) => game.started).length,
+    humans,
+    ais,
+    connections: clients.size,
+    longestGameMs: Math.max(serverMetrics.longestGameMs, longestOpenGameMs)
+  };
+}
+
+function formatDuration(ms) {
+  const totalSeconds = Math.floor(Math.max(0, ms) / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours
+    ? `${hours}h ${minutes}m ${seconds}s`
+    : `${minutes}m ${seconds}s`;
+}
+
+function updateConcurrentGameRecord() {
+  serverMetrics.maxConcurrentGames = Math.max(serverMetrics.maxConcurrentGames, games.size);
+  const humanPlayers = [...games.values()]
+    .reduce((sum, game) => sum + game.participants.filter((entry) => entry.kind === "human").length, 0);
+  serverMetrics.maxConcurrentPlayers = Math.max(serverMetrics.maxConcurrentPlayers, humanPlayers);
+}
+
+function gameLabel(room) {
+  if (!room) return "";
+  return room.private ? "Private game" : `${room.code}${room.title ? ` - ${room.title}` : ""}`;
+}
+
+function recordGameDuration(room, endedAt = Date.now()) {
+  if (!room?.startedAt) return;
+  const duration = endedAt - room.startedAt;
+  if (duration <= serverMetrics.longestGameMs) return;
+  serverMetrics.longestGameMs = duration;
+  serverMetrics.longestGameLabel = gameLabel(room);
+  serverMetrics.longestGameStartedAt = new Date(room.startedAt).toISOString();
+  serverMetrics.longestGameEndedAt = new Date(endedAt).toISOString();
+}
+
+function renderStatsHtml() {
+  const generated = new Date().toISOString();
+  const summary = serverSummary();
+  const gameRows = currentGameRows().map((entry) => `
+      <tr>
+        <td>${escapeHtml(entry.label)}</td>
+        <td>${escapeHtml(entry.status)}</td>
+        <td>${entry.game.resolution}</td>
+        <td>${entry.game.maxWind}</td>
+        <td>${entry.game.initialCash}</td>
+        <td>${entry.humanCount}</td>
+        <td>${entry.aiCount}</td>
+        <td>${escapeHtml(entry.game.participants.map((participant) => participant.name).join(", "))}</td>
+      </tr>`).join("");
+  const rows = statsRows().map((entry, index) => `
+      <tr>
+        <td>${index + 1}</td>
+        <td>${escapeHtml(entry.name)}</td>
+        <td>${entry.kills}</td>
+        <td>${entry.gain}</td>
+        <td>${entry.games}</td>
+        <td>${entry.wins}</td>
+        <td>${entry.lastSeen ? escapeHtml(entry.lastSeen) : ""}</td>
+      </tr>`).join("");
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Scorched Earth 2000 Stats</title>
+  <style>
+    body { background:#000; color:#ddd; font:14px Arial, sans-serif; margin:24px; }
+    h1 { color:#fff; font-size:22px; }
+    h2 { color:#fff; font-size:17px; margin-top:22px; }
+    table { border-collapse:collapse; min-width:720px; background:#111; }
+    th, td { border:1px solid #555; padding:6px 9px; text-align:right; }
+    th { background:#333; color:#fff; }
+    td:nth-child(2), th:nth-child(2) { text-align:left; }
+    .current-games td:first-child, .current-games th:first-child,
+    .current-games td:nth-child(2), .current-games th:nth-child(2),
+    .current-games td:last-child, .current-games th:last-child { text-align:left; }
+    .summary { display:grid; grid-template-columns:repeat(4, auto); gap:8px; justify-content:start; margin:12px 0 18px; }
+    .summary span { background:#111; border:1px solid #555; padding:6px 9px; }
+    .meta { color:#aaa; margin-bottom:14px; }
+  </style>
+</head>
+<body>
+  <h1>Scorched Earth 2000 Stats</h1>
+  <div class="meta">Generated ${escapeHtml(generated)}</div>
+  <div class="summary">
+    <span>Connections: ${summary.connections}</span>
+    <span>Games: ${summary.games}</span>
+    <span>Waiting: ${summary.waiting}</span>
+    <span>Playing: ${summary.playing}</span>
+    <span>Human players: ${summary.humans}</span>
+    <span>AI players: ${summary.ais}</span>
+    <span>Most concurrent games: ${serverMetrics.maxConcurrentGames}</span>
+    <span>Most concurrent players: ${serverMetrics.maxConcurrentPlayers}</span>
+    <span>Longest game: ${formatDuration(summary.longestGameMs)}${serverMetrics.longestGameLabel ? ` (${escapeHtml(serverMetrics.longestGameLabel)})` : ""}</span>
+  </div>
+  <h2>Current Games</h2>
+  <table class="current-games">
+    <thead>
+      <tr><th>Game</th><th>Status</th><th>Resolution</th><th>Wind</th><th>Cash</th><th>Humans</th><th>AI</th><th>Players</th></tr>
+    </thead>
+    <tbody>
+${gameRows || "      <tr><td colspan=\"8\">No games are running right now.</td></tr>"}
+    </tbody>
+  </table>
+  <h2>Player Standings</h2>
+  <table>
+    <thead>
+      <tr><th>Rank</th><th>Player Name</th><th>Kills</th><th>Gain</th><th>Games</th><th>Wins</th><th>Last Seen</th></tr>
+    </thead>
+    <tbody>
+${rows || "      <tr><td colspan=\"7\">No games recorded yet.</td></tr>"}
+    </tbody>
+  </table>
+</body>
+</html>
+`;
+}
+
+function scheduleStatsWrite() {
+  if (statsWritePending) return;
+  statsWritePending = true;
+  setTimeout(() => {
+    statsWritePending = false;
+    writeStatsHtml().catch((error) => log("stats.write_failed", error.message));
+  }, 100);
+}
+
+async function writeStatsHtml() {
+  await fs.mkdir(path.dirname(statsHtmlPath), { recursive: true });
+  await fs.writeFile(statsHtmlPath, renderStatsHtml(), "utf8");
+  log("stats.write", `path=${statsHtmlPath}`);
 }
 
 function roomCode() {
@@ -44,8 +330,10 @@ function broadcast(room, payload) {
 }
 
 function gameList() {
-  return [...games.values()].map((game) => ({
+  return [...games.values()].filter((game) => !game.private).map((game) => ({
     code: game.code,
+    title: game.title,
+    private: game.private,
     players: game.participants.length,
     started: game.started,
     resolution: game.resolution,
@@ -70,6 +358,9 @@ function roomPlayers(room) {
     tankType: participant.tankType ?? (id % 6),
     ai: participant.kind === "ai",
     aiType: participant.aiType ?? 0,
+    weapons: participant.weapons ?? null,
+    items: participant.items ?? null,
+    cash: participant.cash ?? null,
     kills: participant.kills ?? 0,
     gain: participant.gain ?? 0,
     overallKills: participant.overallKills ?? 0,
@@ -96,6 +387,8 @@ function lobbyState(room, selfClientId = null) {
   return {
     type: "lobby",
     game: room.code,
+    title: room.title,
+    private: room.private,
     hostId: room.hostId,
     selfId: selfClientId,
     selfPlayerId: playerIdForClient(room, selfClientId),
@@ -136,10 +429,16 @@ function validRounds(value) {
   return Math.max(1, Math.min(99, Math.trunc(rounds)));
 }
 
+function validGameTitle(value) {
+  return String(value || "").trim().slice(0, 32);
+}
+
 function startPayload(room, member, type = "start") {
   return {
     type,
     game: room.code,
+    title: room.title,
+    private: room.private,
     seed: room.seed,
     resolution: room.resolution,
     maxWind: room.maxWind,
@@ -163,6 +462,8 @@ function createRoom(client, payload) {
   const name = payload.name;
   const room = {
     code: roomCode(),
+    title: validGameTitle(payload.gameName),
+    private: !!payload.private,
     clients: [],
     participants: [],
     hostId: client.id,
@@ -180,19 +481,24 @@ function createRoom(client, payload) {
     turnReportTimer: null,
     roundReady: new Set(),
     initialReady: new Set(),
+    pendingShop: new Set(),
     initialPreparing: false,
     massKillPendingBy: null,
     lastLateAimKey: "",
-    roundEnding: false
+    roundEnding: false,
+    createdAt: Date.now(),
+    startedAt: null
   };
   client.name = name || "Player 1";
   client.room = room;
   room.clients.push(client);
-  room.participants.push({ kind: "human", client, name: client.name, tankType: validTankType(payload.tankType), kills: 0, gain: 0, overallKills: 0, overallGain: 0 });
+  room.participants.push({ kind: "human", client, name: client.name, tankType: validTankType(payload.tankType), cash: null, weapons: null, items: null, kills: 0, gain: 0, overallKills: 0, overallGain: 0 });
   games.set(room.code, room);
-  log("game.create", `game=${room.code} host=${client.name} resolution=${room.resolution} wind=${room.maxWind} cash=${room.initialCash} rounds=${room.rounds}`);
+  updateConcurrentGameRecord();
+  log("game.create", `game=${room.code} title="${room.title}" private=${room.private} host=${client.name} resolution=${room.resolution} wind=${room.maxWind} cash=${room.initialCash} rounds=${room.rounds}`);
   send(client.socket, lobbyState(room, client.id));
   broadcastGameList();
+  scheduleStatsWrite();
 }
 
 function joinRoom(client, payload) {
@@ -210,10 +516,12 @@ function joinRoom(client, payload) {
   client.name = name || `Player ${room.clients.length + 1}`;
   client.room = room;
   room.clients.push(client);
-  room.participants.push({ kind: "human", client, name: client.name, tankType: validTankType(payload.tankType), kills: 0, gain: 0, overallKills: 0, overallGain: 0 });
+  room.participants.push({ kind: "human", client, name: client.name, tankType: validTankType(payload.tankType), cash: null, weapons: null, items: null, kills: 0, gain: 0, overallKills: 0, overallGain: 0 });
+  updateConcurrentGameRecord();
   log("game.join", `game=${room.code} player=${client.name}`);
   for (const member of room.clients) send(member.socket, lobbyState(room, member.id));
   broadcastGameList();
+  scheduleStatsWrite();
 }
 
 function addAi(client, aiType) {
@@ -222,10 +530,11 @@ function addAi(client, aiType) {
   const names = ["Shooter", "Cyborg", "Killer"];
   const type = Math.max(0, Math.min(2, Number(aiType) || 0));
   const name = `${names[type]} ${room.participants.filter((entry) => entry.kind === "ai").length + 1}`;
-  room.participants.push({ kind: "ai", aiType: type, name, tankType: type, kills: 0, gain: 0, overallKills: 0, overallGain: 0 });
+  room.participants.push({ kind: "ai", aiType: type, name, tankType: type, cash: null, weapons: null, items: null, kills: 0, gain: 0, overallKills: 0, overallGain: 0 });
   log("game.add_ai", `game=${room.code} type=${names[type]} name="${name}"`);
   for (const member of room.clients) send(member.socket, lobbyState(room, member.id));
   broadcastGameList();
+  scheduleStatsWrite();
 }
 
 function startRoom(client) {
@@ -239,6 +548,7 @@ function startRoom(client) {
   room.turnReports = new Map();
   room.roundReady = new Set();
   room.initialReady = new Set();
+  room.pendingShop = new Set(room.clients.map((member) => member.id));
   room.initialPreparing = room.initialCash > 0;
   room.massKillPendingBy = null;
   room.lastLateAimKey = "";
@@ -246,9 +556,11 @@ function startRoom(client) {
   room.turnReportTimer = null;
   room.roundEnding = false;
   room.currentRound = 1;
+  room.startedAt = Date.now();
   log("game.start", `game=${room.code} round=${room.currentRound}/${room.rounds} seed=${room.seed} resolution=${room.resolution} wind=${room.maxWind} cash=${room.initialCash} participants=${room.participants.map((p) => p.name).join(",")}`);
   for (const member of room.clients) send(member.socket, startPayload(room, member));
   broadcastGameList();
+  scheduleStatsWrite();
 }
 
 function startNextRound(room) {
@@ -261,6 +573,7 @@ function startNextRound(room) {
   room.turnReports = new Map();
   room.roundReady = new Set();
   room.initialReady = new Set();
+  room.pendingShop = new Set(room.clients.map((member) => member.id));
   room.initialPreparing = false;
   room.massKillPendingBy = null;
   room.lastLateAimKey = "";
@@ -270,6 +583,7 @@ function startNextRound(room) {
   log("game.round_start", `game=${room.code} round=${room.currentRound}/${room.rounds} seed=${room.seed}`);
   for (const member of room.clients) send(member.socket, startPayload(room, member, "round-start"));
   broadcastGameList();
+  scheduleStatsWrite();
 }
 
 function relayAim(client, payload) {
@@ -383,6 +697,7 @@ function beginMassKill(room, client) {
 
 function endDesyncedGame(room, reason) {
   if (!room?.started) return;
+  recordGameDuration(room);
   room.started = false;
   if (room.turnReportTimer) clearTimeout(room.turnReportTimer);
   room.turnReportTimer = null;
@@ -401,6 +716,7 @@ function endDesyncedGame(room, reason) {
     players: roomPlayers(room)
   });
   broadcastGameList();
+  scheduleStatsWrite();
 }
 
 function advanceTurn(client, payload) {
@@ -437,15 +753,17 @@ function advanceTurn(client, payload) {
   payload = activeReport.payload;
   if (room.turnReportTimer) clearTimeout(room.turnReportTimer);
   room.turnReportTimer = null;
+  const reportedStats = mergedTurnStats(room.turnReports);
+  if (reportedStats.length) payload.stats = reportedStats;
+  mergeTurnInventory(room, room.turnReports);
   if (Array.isArray(payload.stats)) {
+    let statsChanged = false;
     for (const stat of payload.stats) {
       const participant = room.participants[stat.id];
       if (!participant) continue;
-      participant.kills = Number(stat.kills) || 0;
-      participant.gain = Number(stat.gain) || 0;
-      participant.overallKills = Number(stat.overallKills) || 0;
-      participant.overallGain = Number(stat.overallGain) || 0;
+      if (recordStatsDelta(participant, stat)) statsChanged = true;
     }
+    if (statsChanged) scheduleStatsWrite();
   }
   const alive = Array.isArray(payload.alive) ? payload.alive : room.participants.map((_, id) => id);
   if (alive.length <= 1) {
@@ -454,6 +772,9 @@ function advanceTurn(client, payload) {
     room.turnReportTimer = null;
     const winner = alive.length ? alive[0] : null;
     log("game.round_end", `game=${room.code} round=${room.currentRound}/${room.rounds} winner=${winner ?? "none"} checksum=${payload.checksum ?? "n/a"}`);
+    recordGameDuration(room);
+    scheduleStatsWrite();
+    if (room.currentRound >= room.rounds) recordGameFinished(room, winner);
     broadcast(room, {
       type: "round-over",
       winner,
@@ -470,6 +791,7 @@ function advanceTurn(client, payload) {
       for (const member of room.clients) member.room = null;
       room.clients = [];
       broadcastGameList();
+      scheduleStatsWrite();
     }
     return;
   }
@@ -523,6 +845,7 @@ function relayChat(client, payload) {
 function relayRoundReady(client) {
   const room = client.room;
   if (!room?.started) return;
+  if (room.pendingShop?.has(client.id)) return;
   if (room.initialPreparing) {
     room.initialReady.add(client.id);
     const waiting = waitingClients(room, room.initialReady);
@@ -566,6 +889,7 @@ function relayShop(client, payload) {
   participant.weapons = Array.isArray(payload.weapons) ? payload.weapons.map((value) => Number(value) || 0) : participant.weapons;
   participant.items = Array.isArray(payload.items) ? payload.items.map((value) => Number(value) || 0) : participant.items;
   participant.cash = Number(payload.cash) || 0;
+  if (room.pendingShop) room.pendingShop.delete(client.id);
   log("game.shop", `game=${room.code} player=${playerId} cash=${participant.cash}`);
   broadcast(room, {
     type: "shop-update",
@@ -663,20 +987,26 @@ function detach(client) {
     client.room = null;
     log("game.remove", `game=${room.code}`);
     broadcastGameList();
+    scheduleStatsWrite();
     return;
   }
   if (room.hostId === client.id) room.hostId = room.clients[0].id;
   if (room.active >= room.participants.length) room.active = 0;
+  if (room.started && room.participants.filter((participant) => participant.kind === "human").length < 1) {
+    recordGameDuration(room);
+  }
   log("game.leave", `game=${room.code} client=${client.name}`);
   for (const member of room.clients) send(member.socket, lobbyState(room, member.id));
   client.room = null;
   broadcastGameList();
+  scheduleStatsWrite();
 }
 
 const server = http.createServer(async (request, response) => {
   try {
-    const requested = request.url === "/" ? "/index.html" : request.url;
-    const file = path.resolve(root, `.${requested.split("?")[0]}`);
+    const requestUrl = new URL(request.url || "/", "http://localhost");
+    const requested = requestUrl.pathname === "/" ? "/index.html" : requestUrl.pathname;
+    const file = path.resolve(root, `.${decodeURIComponent(requested)}`);
     if (!file.startsWith(root)) throw new Error("forbidden");
     const data = await fs.readFile(file);
     response.writeHead(200, { "content-type": mime.get(path.extname(file)) || "application/octet-stream" });
@@ -708,13 +1038,16 @@ server.on("upgrade", (request, socket) => {
   );
   const client = { id: nextClientId++, socket, room: null, name: "", buffer: Buffer.alloc(0) };
   clients.add(client);
+  scheduleStatsWrite();
   socket.on("data", (chunk) => consumeFrames(client, chunk));
-  socket.on("close", () => { clients.delete(client); detach(client); });
-  socket.on("error", () => { clients.delete(client); detach(client); });
+  socket.on("close", () => { clients.delete(client); detach(client); scheduleStatsWrite(); });
+  socket.on("error", () => { clients.delete(client); detach(client); scheduleStatsWrite(); });
   send(socket, { type: "hello", clientId: client.id });
   send(socket, { type: "game-list", games: gameList() });
 });
 
 server.listen(port, () => {
   log("server.listen", `http://localhost:${port}`);
+  log("stats.path", statsHtmlPath);
+  writeStatsHtml().catch((error) => log("stats.write_failed", error.message));
 });

@@ -1,5 +1,6 @@
 "use strict";
 
+const CLIENT_VERSION = "v1.1, 5/11/2026";
 let WIDTH = 800;
 let HEIGHT = 600;
 const MAX_POWER = 1000;
@@ -365,7 +366,7 @@ class ScorchGame {
     this.statsSnapshot = [];
     this.resize(WIDTH, HEIGHT);
     this.rebuildPlayers(4, 2);
-    this.newRound();
+    this.newRound(false);
   }
   rebuildPlayers(count, aiCount, humanTankType = 0) {
     const players = [];
@@ -402,9 +403,22 @@ class ScorchGame {
     for (const entry of players) {
       const player = this.players[entry.id];
       if (!player) continue;
+      this.applyConfiguredInventory(player, entry);
       player.overallKills = Number(entry.overallKills) || 0;
       player.overallGain = Number(entry.overallGain) || 0;
     }
+  }
+  applyConfiguredInventory(player, entry) {
+    if (Array.isArray(entry.weapons)) {
+      player.weapons = WEAPONS.map((weapon, index) => {
+        const value = Number(entry.weapons[index]);
+        return Number.isFinite(value) ? Math.max(0, value) : weapon.ammo;
+      });
+    }
+    if (Array.isArray(entry.items)) {
+      player.items = ITEMS.map((_, index) => Math.max(0, Number(entry.items[index]) || 0));
+    }
+    if (entry.cash != null) player.cash = Math.max(0, Number(entry.cash) || 0);
   }
   captureStatsSnapshot() {
     this.statsSnapshot = this.players.map((player) => ({
@@ -440,7 +454,7 @@ class ScorchGame {
     document.documentElement.style.setProperty("--field-height", `${height}px`);
     this.image = this.ctx.createImageData(width, height);
   }
-  newRound() {
+  newRound(resetControls = true) {
     if (this.roundRestartTimer) {
       clearTimeout(this.roundRestartTimer);
       this.roundRestartTimer = null;
@@ -465,6 +479,7 @@ class ScorchGame {
     this.placeTanks();
     this.active = this.players.findIndex((p) => p.alive);
     this.render("New round.");
+    if (resetControls) setControlsDisabled(false);
     this.scheduleAiTurn();
   }
   applyAutoDefense(player) {
@@ -1933,15 +1948,15 @@ class ScorchGame {
       angleStep: Math.max(accuracy, 4),
       powerCenter: startPower,
       powerSpan: player.powerLimit,
-      powerStep: Math.max(10 * accuracy, 40)
+      powerStep: Math.max(8 * accuracy, 24)
     });
     const shot = fallback.score > 0 ? this.applyAiInaccuracy(player, { angle: fallback.angle, power: fallback.power }) : { angle: startAngle, power: startPower };
     await this.animateAiAim(player, path, shot);
     return shot;
   }
   applyAiInaccuracy(player, shot) {
-    const angleSpread = [9, 4, 1][player.aiType] ?? 6;
-    const powerSpread = [110, 45, 12][player.aiType] ?? 80;
+    const angleSpread = [3, 2, 0][player.aiType] ?? 2;
+    const powerSpread = [35, 18, 0][player.aiType] ?? 25;
     const angleNoise = this.aiNoise(player, shot, 1) * 2 - 1;
     const powerNoise = this.aiNoise(player, shot, 2) * 2 - 1;
     const angle = Math.max(0, Math.min(179, Math.round(shot.angle + angleNoise * angleSpread)));
@@ -2193,6 +2208,8 @@ class MultiplayerSession {
     this.hostId = null;
     this.players = [];
     this.games = [];
+    this.title = "";
+    this.private = false;
     this.settings = { resolution: "800x600", maxWind: 10, initialCash: DEFAULT_INITIAL_CASH, rounds: 3, currentRound: 0 };
     this.activeTurnId = 0;
     this.gameOver = false;
@@ -2204,6 +2221,7 @@ class MultiplayerSession {
     updateDebugConsole();
   }
   roster() {
+    syncGameModeUi();
     const box = document.getElementById("multiplayerRoster");
     box.innerHTML = this.players.map((player) =>
       `<div>${player.id === this.playerId ? ">" : ""} ${escapeHtml(player.name)}${player.clientId === this.hostId ? " [host]" : ""}</div>`
@@ -2211,7 +2229,9 @@ class MultiplayerSession {
     document.getElementById("startRoom").disabled = !this.connected || this.started || this.clientId !== this.hostId || this.players.length < 2;
     document.getElementById("createRoom").disabled = !this.connected || !!this.room;
     document.getElementById("joinRoom").disabled = !this.connected || !!this.room;
-    for (const id of ["multiplayerTank", "multiplayerResolution", "multiplayerWind", "multiplayerCash", "multiplayerRounds"]) {
+    document.getElementById("shareRoom").disabled = !this.room;
+    document.getElementById("joinUrl").value = this.shareUrl();
+    for (const id of ["multiplayerTank", "multiplayerGameName", "multiplayerPrivate", "multiplayerResolution", "multiplayerWind", "multiplayerCash", "multiplayerRounds"]) {
       document.getElementById(id).disabled = !!this.room || this.started;
     }
     syncTankPickers();
@@ -2223,7 +2243,7 @@ class MultiplayerSession {
     const box = document.getElementById("multiplayerGames");
     box.innerHTML = this.games.map((entry) => `
       <div class="multiplayer-game-row">
-        <span>${entry.code} ${entry.players}/8 ${entry.started ? `round ${entry.currentRound}/${entry.rounds}` : "open"} | ${escapeHtml(entry.resolution)} wind ${entry.maxWind} cash ${entry.initialCash} rounds ${entry.rounds} | ${entry.names.map(escapeHtml).join(", ")}</span>
+        <span>${entry.code}${entry.title ? ` ${escapeHtml(entry.title)}` : ""} ${entry.players}/8 ${entry.started ? `round ${entry.currentRound}/${entry.rounds}` : "open"} | ${escapeHtml(entry.resolution)} wind ${entry.maxWind} cash ${entry.initialCash} rounds ${entry.rounds} | ${entry.names.map(escapeHtml).join(", ")}</span>
         <button data-join-game="${entry.code}" ${entry.started || this.started || this.room ? "disabled" : ""}>Join</button>
       </div>
     `).join("") || "<div>No public games.</div>";
@@ -2234,7 +2254,7 @@ class MultiplayerSession {
     document.getElementById("multiplayerChatLog").innerHTML = this.chatLog.map((line) => `<div>${escapeHtml(line)}</div>`).join("");
     const log = document.getElementById("multiplayerChatLog");
     log.scrollTop = log.scrollHeight;
-    this.game.addChatMessage(text);
+    if (this.started) this.game.addChatMessage(text);
   }
   ensureSocket() {
     if (this.socket && this.socket.readyState <= WebSocket.OPEN) return Promise.resolve();
@@ -2252,6 +2272,7 @@ class MultiplayerSession {
       this.socket.addEventListener("close", () => {
         this.connected = false;
         this.started = false;
+        this.room = "";
         this.status("Disconnected.");
         this.roster();
         setControlsDisabled(false);
@@ -2267,6 +2288,8 @@ class MultiplayerSession {
     this.send({
       type: "create",
       name: this.name(),
+      gameName: document.getElementById("multiplayerGameName").value,
+      private: document.getElementById("multiplayerPrivate").checked,
       tankType: Number(document.getElementById("multiplayerTank").value),
       resolution: document.getElementById("multiplayerResolution").value,
       maxWind: Number(document.getElementById("multiplayerWind").value),
@@ -2286,10 +2309,26 @@ class MultiplayerSession {
   start() {
     this.send({ type: "start" });
   }
+  shareUrl() {
+    if (!this.room) return "";
+    const url = new URL(location.href);
+    url.searchParams.set("join", this.room);
+    return url.href;
+  }
+  async share() {
+    const url = this.shareUrl();
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      this.status(`Join URL copied: ${url}`);
+    } catch {
+      this.status(`Join URL: ${url}`);
+    }
+  }
   addAi(aiType) {
     this.send({ type: "add-ai", aiType });
   }
-  syncRoster(players) {
+  syncRoster(players, options = {}) {
     if (!Array.isArray(players)) return;
     this.players = players;
     for (const entry of players) {
@@ -2298,10 +2337,18 @@ class MultiplayerSession {
       player.name = entry.name;
       player.ai = !!entry.ai;
       player.aiType = Number(entry.aiType) || 0;
-      player.kills = Number(entry.kills) || 0;
-      player.earnedCash = Number(entry.gain) || 0;
-      player.overallKills = Number(entry.overallKills) || 0;
-      player.overallGain = Number(entry.overallGain) || 0;
+      this.game.applyConfiguredInventory(player, entry);
+      if (options.replaceStats) {
+        player.kills = Number(entry.kills) || 0;
+        player.earnedCash = Number(entry.gain) || 0;
+        player.overallKills = Number(entry.overallKills) || 0;
+        player.overallGain = Number(entry.overallGain) || 0;
+      } else {
+        player.kills = Math.max(Number(player.kills) || 0, Number(entry.kills) || 0);
+        player.earnedCash = Math.max(Number(player.earnedCash) || 0, Number(entry.gain) || 0);
+        player.overallKills = Math.max(Number(player.overallKills) || 0, Number(entry.overallKills) || 0);
+        player.overallGain = Math.max(Number(player.overallGain) || 0, Number(entry.overallGain) || 0);
+      }
     }
     this.game.captureStatsSnapshot();
   }
@@ -2314,6 +2361,8 @@ class MultiplayerSession {
     this.playerId = message.players?.find((player) => player.clientId === this.clientId)?.id ?? this.playerId;
   }
   applySettings(message) {
+    this.title = message.title || "";
+    this.private = !!message.private;
     this.settings = {
       resolution: message.resolution || this.settings.resolution,
       maxWind: Number(message.maxWind ?? this.settings.maxWind),
@@ -2322,6 +2371,8 @@ class MultiplayerSession {
       currentRound: Number(message.currentRound ?? this.settings.currentRound)
     };
     document.getElementById("multiplayerResolution").value = this.settings.resolution;
+    document.getElementById("multiplayerGameName").value = this.title;
+    document.getElementById("multiplayerPrivate").checked = this.private;
     document.getElementById("multiplayerWind").value = String(this.settings.maxWind);
     document.getElementById("multiplayerCash").value = String(this.settings.initialCash);
     document.getElementById("multiplayerRounds").value = String(this.settings.rounds);
@@ -2374,7 +2425,12 @@ class MultiplayerSession {
   applyShopUpdate(message) {
     const player = this.game.players[message.playerId];
     if (!player) return;
-    if (Array.isArray(message.weapons)) player.weapons = message.weapons.map((value, index) => Math.max(0, Number(value) || WEAPONS[index]?.ammo || 0));
+    if (Array.isArray(message.weapons)) {
+      player.weapons = WEAPONS.map((weapon, index) => {
+        const value = Number(message.weapons[index]);
+        return Number.isFinite(value) ? Math.max(0, value) : weapon.ammo;
+      });
+    }
     if (Array.isArray(message.items)) player.items = message.items.map((value) => Math.max(0, Number(value) || 0));
     player.cash = Math.max(0, Number(message.cash) || 0);
     this.game.render();
@@ -2394,6 +2450,12 @@ class MultiplayerSession {
         gain: entry.earnedCash,
         overallKills: entry.overallKills,
         overallGain: entry.overallGain
+      })),
+      inventory: this.game.players.map((entry) => ({
+        id: entry.id,
+        weapons: entry.weapons,
+        items: entry.items,
+        cash: entry.cash
       }))
     });
   }
@@ -2415,9 +2477,9 @@ class MultiplayerSession {
       this.room = message.game;
       this.applyIdentity(message);
       this.applySettings(message);
-      this.syncRoster(message.players);
+      this.syncRoster(message.players, { replaceStats: true });
       document.getElementById("multiplayerRoom").value = this.room;
-      this.status(`Game ${this.room} ready. ${this.settings.resolution}, wind ${this.settings.maxWind}, cash ${this.settings.initialCash}, ${this.settings.rounds} rounds.`);
+      this.status(`${this.private ? "Private " : ""}Game ${this.room}${this.title ? ` (${this.title})` : ""} ready. ${this.settings.resolution}, wind ${this.settings.maxWind}, cash ${this.settings.initialCash}, ${this.settings.rounds} rounds.`);
       this.roster();
       this.gameList();
       return;
@@ -2430,8 +2492,8 @@ class MultiplayerSession {
       initialShopOpened = false;
       this.applyIdentity(message);
       this.applySettings(message);
-      this.syncRoster(message.players);
       this.game.startMultiplayerRound(message);
+      this.syncRoster(message.players, { replaceStats: true });
       document.getElementById("multiplayerBox").classList.add("hidden");
       this.status(`Game ${this.room} round ${this.settings.currentRound}/${this.settings.rounds}. You are player ${this.playerId + 1}.`);
       this.roster();
@@ -2444,10 +2506,10 @@ class MultiplayerSession {
       this.activeTurnId = Number(message.activeTurnId ?? 0);
       this.applyIdentity(message);
       this.applySettings(message);
-      this.syncRoster(message.players);
       hideWaitingBox();
       document.getElementById("roundEndBox").classList.add("hidden");
       this.game.startMultiplayerRound(message);
+      this.syncRoster(message.players, { replaceStats: true });
       this.status(`Game ${this.room} round ${this.settings.currentRound}/${this.settings.rounds}.`);
       this.roster();
       return;
@@ -2644,6 +2706,7 @@ game.canvas.addEventListener("mouseleave", () => {
 });
 
 function updateUi(game, message = "") {
+  syncGameModeUi();
   const activePlayer = game.players[game.active];
   if (activePlayer && (activePlayer.weapons[game.weapon] ?? 0) <= 0) game.weapon = 0;
   const weaponOptions = WEAPONS
@@ -2684,7 +2747,8 @@ function roundReadoutText() {
 }
 
 function closeTopDialog() {
-  for (const id of ["licenseBox", "aboutBox", "inventoryBox", "shopBox", "roundEndBox", "waitingBox", "statsBox", "debugBox", "multiplayerBox", "systemMenu", "roundSetup"]) {
+  if (!document.getElementById("waitingBox").classList.contains("hidden")) return false;
+  for (const id of ["licenseBox", "aboutBox", "inventoryBox", "shopBox", "roundEndBox", "statsBox", "debugBox", "multiplayerBox", "systemMenu", "roundSetup"]) {
     const element = document.getElementById(id);
     if (!element.classList.contains("hidden")) {
       element.classList.add("hidden");
@@ -2756,7 +2820,7 @@ function showRoundEnd(options = {}) {
   const shopButton = document.getElementById("goShopping");
   nextButton.textContent = final ? "Back to games" : "Play next round";
   shopButton.classList.toggle("hidden", final);
-  document.getElementById("roundEndRows").innerHTML = statsRowsHtml(game.players);
+  document.getElementById("roundEndRows").innerHTML = statsRowsHtml(currentStatsPlayers());
   document.getElementById("roundEndBox").classList.remove("hidden");
 }
 
@@ -2832,6 +2896,11 @@ function localHumanPlayer() {
   return game.players.find((player) => !player.ai) ?? game.players[0];
 }
 
+function localShopPlayers() {
+  const humans = game.players.filter((player) => !player.ai);
+  return humans.length ? humans : [game.players[0]].filter(Boolean);
+}
+
 function showInventory() {
   const player = activePlayer();
   const weaponRows = WEAPONS.map((weapon, index) => ({ name: weapon.name, qty: player.weapons[index], action: `<button data-select-weapon="${index}">Select</button>` }))
@@ -2890,14 +2959,44 @@ async function useItem(index) {
 
 let shopOrders = [];
 let shopPlayer = null;
+let shopQueue = [];
 let initialShopOpened = false;
 let shopMode = "initial";
-function openShop(mode = "initial") {
+function openShop(mode = "initial", players = null) {
   shopMode = mode;
-  shopPlayer = localHumanPlayer();
+  shopQueue = (players ?? [localHumanPlayer()]).filter(Boolean);
+  shopPlayer = shopQueue.shift() ?? localHumanPlayer();
+  openCurrentShop();
+}
+
+function openCurrentShop() {
   shopOrders = Array(WEAPONS.length + ITEMS.length).fill(0);
   renderShop();
   document.getElementById("shopBox").classList.remove("hidden");
+}
+
+function finishShopSession(player, mode, message, sendUpdate = false) {
+  document.getElementById("shopBox").classList.add("hidden");
+  if (shopQueue.length) {
+    shopPlayer = shopQueue.shift();
+    openCurrentShop();
+    return;
+  }
+  shopMode = "initial";
+  shopPlayer = null;
+  if (multiplayer.started) {
+    if (sendUpdate && player) multiplayer.sendShopUpdate(player);
+    if (mode === "between-round" || mode === "initial") {
+      multiplayer.readyForNextRound();
+      game.render(message);
+      setControlsDisabled(true);
+    } else {
+      game.render(message);
+      setControlsDisabled(false);
+    }
+  } else {
+    game.newRound();
+  }
 }
 
 function maybeOpenInitialShop() {
@@ -2966,45 +3065,19 @@ function confirmShop() {
     player.items[i] += shopOrders[slot];
     player.cash -= shopOrders[slot] / ITEMS[i].bundle * ITEMS[i].price;
   }
-  document.getElementById("shopBox").classList.add("hidden");
   const mode = shopMode;
-  shopMode = "initial";
-  shopPlayer = null;
-  if (multiplayer.started) {
-    multiplayer.sendShopUpdate(player);
-    if (mode === "between-round" || mode === "initial") {
-      multiplayer.readyForNextRound();
-      game.render(mode === "initial" ? "Shopping complete. Waiting for players..." : "Shopping complete. Waiting for next round...");
-      setControlsDisabled(true);
-    } else {
-      game.render("Shopping complete.");
-      setControlsDisabled(false);
-    }
-  } else {
-    game.newRound();
-  }
+  const message = mode === "initial" ? "Shopping complete. Waiting for players..." : "Shopping complete. Waiting for next round...";
+  finishShopSession(player, mode, message, true);
 }
 
 function cancelShop() {
-  document.getElementById("shopBox").classList.add("hidden");
   const mode = shopMode;
-  shopMode = "initial";
-  shopPlayer = null;
-  if (multiplayer.started) {
-    if (mode === "between-round" || mode === "initial") {
-      multiplayer.readyForNextRound();
-      game.render(mode === "initial" ? "Shopping skipped. Waiting for players..." : "Shopping skipped. Waiting for next round...");
-      setControlsDisabled(true);
-    } else {
-      game.render("Shopping skipped.");
-      setControlsDisabled(false);
-    }
-  } else {
-    game.newRound();
-  }
+  const message = mode === "initial" ? "Shopping skipped. Waiting for players..." : "Shopping skipped. Waiting for next round...";
+  finishShopSession(shopPlayer, mode, message, false);
 }
 
 function setControlsDisabled(disabled) {
+  syncGameModeUi();
   const remoteTurn = globalThis.multiplayerSession?.started && !globalThis.multiplayerSession.isLocalTurn();
   const active = game.players[game.active];
   const aiTurn = !!active?.ai;
@@ -3014,13 +3087,25 @@ function setControlsDisabled(disabled) {
   }
 }
 
+function syncGameModeUi() {
+  const net = globalThis.multiplayerSession;
+  const multiplayerMode = !!(net?.started || net?.room || net?.gameOver);
+  document.getElementById("newRound").classList.toggle("hidden", multiplayerMode);
+  return multiplayerMode;
+}
+
 const weaponSelect = document.getElementById("weaponSelect");
+document.title = `Scorched Earth 2000 HTML Port ${CLIENT_VERSION}`;
+document.getElementById("clientVersionLabel").textContent = `Scorched Earth 2000 ${CLIENT_VERSION}`;
+document.getElementById("aboutVersionLabel").textContent = CLIENT_VERSION;
 weaponSelect.addEventListener("change", (event) => {
   game.weapon = Number(event.target.value);
   game.render();
 });
 initTankPickers();
 document.getElementById("multiplayerBox").classList.remove("hidden");
+const joinCode = new URLSearchParams(location.search).get("join");
+if (joinCode) document.getElementById("multiplayerRoom").value = joinCode.trim().toUpperCase().slice(0, 6);
 multiplayer.roster();
 multiplayer.ensureSocket().catch((error) => multiplayer.status(`${error.message} Use Single Player or start the multiplayer server.`));
 
@@ -3047,6 +3132,7 @@ document.getElementById("fire").addEventListener("click", () => {
   else game.fire();
 });
 document.getElementById("newRound").addEventListener("click", () => {
+  if (syncGameModeUi()) return;
   document.getElementById("roundSetup").classList.remove("hidden");
 });
 document.getElementById("playerCount").addEventListener("change", () => {
@@ -3099,6 +3185,8 @@ document.getElementById("singlePlayerMode").addEventListener("click", () => {
 document.getElementById("createRoom").addEventListener("click", () => multiplayer.create().catch((error) => multiplayer.status(error.message)));
 document.getElementById("joinRoom").addEventListener("click", () => multiplayer.join().catch((error) => multiplayer.status(error.message)));
 document.getElementById("startRoom").addEventListener("click", () => multiplayer.start());
+document.getElementById("shareRoom").addEventListener("click", () => multiplayer.share());
+document.getElementById("joinUrl").addEventListener("focus", (event) => event.target.select());
 document.querySelector(".multiplayer-ai-actions").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-add-ai]");
   if (!button) return;
@@ -3122,7 +3210,7 @@ document.getElementById("gameChatForm").addEventListener("submit", (event) => {
 
 function sendChatFromInput(input) {
   const text = input.value.trim();
-  if (!text || !multiplayer.started) return false;
+  if (!text || !multiplayer.room) return false;
   multiplayer.sendChat(text);
   input.value = "";
   return true;
@@ -3209,7 +3297,8 @@ document.getElementById("playNextRound").addEventListener("click", () => {
 });
 document.getElementById("goShopping").addEventListener("click", () => {
   document.getElementById("roundEndBox").classList.add("hidden");
-  openShop(multiplayer.started ? "between-round" : "initial");
+  if (multiplayer.started) openShop("between-round");
+  else openShop("between-round", localShopPlayers());
 });
 document.getElementById("about").addEventListener("click", () => {
   document.getElementById("aboutBox").classList.remove("hidden");
@@ -3250,6 +3339,10 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Escape") {
+    if (!document.getElementById("waitingBox").classList.contains("hidden")) {
+      event.preventDefault();
+      return;
+    }
     if (closeTopDialog()) event.preventDefault();
     return;
   }
@@ -3265,7 +3358,12 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     return;
   }
-  if (game.animating || (multiplayer.started && !multiplayer.isLocalTurn())) return;
+  if (
+    game.animating ||
+    game.roundOver ||
+    document.getElementById("fire").disabled ||
+    (multiplayer.started && !multiplayer.isLocalTurn())
+  ) return;
   const player = game.players[game.active];
   if (event.key === "ArrowLeft") player.angle = (player.angle + 1) % 180;
   else if (event.key === "ArrowRight") player.angle = (player.angle + 179) % 180;

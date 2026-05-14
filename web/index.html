@@ -10,7 +10,7 @@
   <main class="applet-shell">
     <section class="applet" id="applet">
       <div class="topbar">
-        <span>Scorched Earth 2000 v1.1, 5/11/2026</span>
+        <span id="clientVersionLabel"></span>
         <span id="turnLabel"></span>
       </div>
       <canvas id="field" width="800" height="600" aria-label="Scorched Earth 2000 game field"></canvas>
@@ -110,6 +110,10 @@
       <div class="multiplayer-panel">
         <label for="multiplayerName">Name</label>
         <input id="multiplayerName" value="Player">
+        <label for="multiplayerGameName">Game name</label>
+        <input id="multiplayerGameName" maxlength="32" value="">
+        <label for="multiplayerPrivate">Private</label>
+        <label class="checkbox-row"><input id="multiplayerPrivate" type="checkbox"> <span>Hide from public list</span></label>
         <label for="multiplayerTank">Tank</label>
         <select id="multiplayerTank" class="tank-select-native">
           <option value="0">Tank 1</option>
@@ -143,7 +147,10 @@
           <button id="createRoom">Create Game</button>
           <button id="joinRoom">Join</button>
           <button id="startRoom">Start</button>
+          <button id="shareRoom">Share Game</button>
         </div>
+        <label for="joinUrl">Join URL</label>
+        <input id="joinUrl" readonly>
         <div class="multiplayer-actions multiplayer-ai-actions">
           <button data-add-ai="0">Add Shooter</button>
           <button data-add-ai="1">Add Cyborg</button>
@@ -273,7 +280,7 @@
       <div class="credits-panel">
         <div class="credits-scroll">
           <div class="credit yellow">Scorched Earth 2000</div>
-          <div class="credit white">v1.1, 5/11/2026</div>
+          <div class="credit white" id="aboutVersionLabel"></div>
           <div class="credit cyan">by KAOS Software Team</div>
           <br>
           <div class="credit cyan">JavaScript Port</div>
