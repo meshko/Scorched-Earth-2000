@@ -46,6 +46,18 @@ const ITEMS = [
   { name: "Auto Defense", price: 5000, bundle: 1, max: 0, type: "autodefense" },
   { name: "Fuel", price: 10000, bundle: 100, max: 1000, type: "fuel" }
 ];
+const PARACHUTE_ICON = [
+  [0,0,0,0,0,1,1,1,1,0,0,0,0,0],
+  [0,0,0,1,1,1,1,1,1,1,1,0,0,0],
+  [0,0,1,1,1,1,1,1,1,1,1,1,0,0],
+  [0,1,1,1,1,1,1,1,1,1,1,1,1,0],
+  [1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+  [0,1,0,0,1,0,0,0,0,1,0,0,1,0],
+  [0,0,1,0,0,1,0,0,1,0,0,1,0,0],
+  [0,0,0,1,0,1,0,0,1,0,1,0,0,0],
+  [0,0,0,0,1,0,1,1,0,1,0,0,0,0],
+  [0,0,0,0,0,1,1,1,1,0,0,0,0,0]
+];
 const DEFAULT_INITIAL_CASH = 50000;
 let INITIAL_CASH = DEFAULT_INITIAL_CASH;
 const AI_NAMES = ["Shooter", "Cyborg", "Killer"];
@@ -328,6 +340,7 @@ class Player {
     this.weapons = WEAPONS.map((weapon) => weapon.ammo);
     this.items = ITEMS.map(() => 0);
     this.shield = null;
+    this.parachutes = 0;
     this.tracer = false;
     this.autoDefense = false;
   }
@@ -417,6 +430,7 @@ class ScorchGame {
     }
     if (Array.isArray(entry.items)) {
       player.items = ITEMS.map((_, index) => Math.max(0, Number(entry.items[index]) || 0));
+      player.parachutes = Math.min(player.parachutes, player.items[3] || 0);
     }
     if (entry.cash != null) player.cash = Math.max(0, Number(entry.cash) || 0);
   }
@@ -627,11 +641,38 @@ class ScorchGame {
     for (const player of this.players) {
       if (!player.alive) continue;
       this.drawShield(player);
+      this.drawParachute(player);
       this.drawTank(player);
     }
     this.drawWind();
     this.drawChatMessages();
     this.drawTooltip();
+  }
+  drawParachute(player) {
+    if (player.parachutes <= 0) return;
+    const startX = player.x + Math.floor((player.width - PARACHUTE_ICON[0].length) / 2);
+    const startY = player.turretY(0) - PARACHUTE_ICON.length;
+    const drawX = Math.max(0, startX);
+    const drawY = Math.max(0, startY);
+    const drawW = Math.min(PARACHUTE_ICON[0].length, WIDTH - drawX);
+    const drawH = Math.min(PARACHUTE_ICON.length, HEIGHT - drawY);
+    if (drawW <= 0 || drawH <= 0) return;
+    const data = this.ctx.getImageData(
+      drawX,
+      drawY,
+      drawW,
+      drawH
+    );
+    for (let y = 0; y < PARACHUTE_ICON.length; y++) {
+      for (let x = 0; x < PARACHUTE_ICON[y].length; x++) {
+        if (!PARACHUTE_ICON[y][x]) continue;
+        const dx = startX + x - drawX;
+        const dy = startY + y - drawY;
+        if (dx < 0 || dy < 0 || dx >= data.width || dy >= data.height) continue;
+        writePixel(data.data, dy * data.width + dx, WHITE);
+      }
+    }
+    this.ctx.putImageData(data, drawX, drawY);
   }
   startGalslaMode() {
     if (this.galslaMode) return;
@@ -1766,19 +1807,25 @@ class ScorchGame {
     for (const player of this.players) {
       if (!player.alive) continue;
       const fallCount = await this.settleOneTank(player, true);
-      if (fallCount > 0) {
-        const parachuteOpen = fallCount > 5 && player.items[3] > 0;
-        if (parachuteOpen) player.items[3]--;
-        else this.applyDamage(player, fallCount);
-        if (player.powerLimit < MIN_POWER) {
-          player.alive = false;
-          deaths.push(player);
-          this.recordKill(shooter, player);
-        }
+      if (this.applyFallingDamage(player, fallCount)) {
+        deaths.push(player);
+        this.recordKill(shooter, player);
       }
     }
     for (const player of deaths) await this.randomTankExplosion(player);
     return deaths;
+  }
+  applyFallingDamage(player, fallCount) {
+    if (fallCount <= 0) return false;
+    if (fallCount > 5 && player.parachutes > 0 && player.items[3] > 0) {
+      player.parachutes--;
+      player.items[3]--;
+    } else {
+      this.applyDamage(player, fallCount);
+    }
+    if (player.powerLimit >= MIN_POWER) return false;
+    player.alive = false;
+    return true;
   }
   async massKillAll() {
     this.animating = true;
@@ -1793,7 +1840,7 @@ class ScorchGame {
     this.captureStatsSnapshot();
     this.render("Mass kill.");
   }
-  async settleOneTank(player, animate = false) {
+  async settleOneTank(player, animate = false, options = {}) {
     const leftBase = player.sprite[0][5] ?? 0;
     const rightBase = player.sprite[0][6] ?? 0;
     const baseStart = leftBase;
@@ -1819,6 +1866,7 @@ class ScorchGame {
         }
         continue;
       }
+      if (options.usingFuel) return fallCount;
       for (let i = 0; i < player.height && (s < 0 || e < 0); i++) {
         if (!this.bitmap.isBackground(player.x - 1, player.y + i)) {
           s = 0;
@@ -2195,6 +2243,24 @@ function escapeHtml(value) {
   }[char]));
 }
 
+const PLAYER_NAME_STORAGE_KEY = "scorch2000.multiplayerName";
+
+function cleanPlayerName(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 24);
+}
+
+function formatCountdown(ms) {
+  if (ms == null) return "No auto-start";
+  const seconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function suggestedGameName(playerName) {
+  const name = cleanPlayerName(playerName) || "Player";
+  return `${name}'s game`.slice(0, 32);
+}
+
 const game = new ScorchGame(document.getElementById("field"));
 class MultiplayerSession {
   constructor(game) {
@@ -2214,21 +2280,73 @@ class MultiplayerSession {
     this.activeTurnId = 0;
     this.gameOver = false;
     this.chatLog = [];
+    this.lobbyChatLog = [];
     this.lastChecksum = "";
+    this.socketReady = null;
+    this.helloReady = null;
+    this.resolveHello = null;
+    this.joinPending = null;
+    this.joinRetryTimer = null;
+    this.autoStartAt = null;
+    this.countdownTimer = null;
+    this.screen = "name";
+    this.pendingJoinCode = new URLSearchParams(location.search).get("join")?.trim().toUpperCase().slice(0, 6) || "";
   }
   status(text) {
     document.getElementById("multiplayerStatus").textContent = text;
     updateDebugConsole();
   }
+  showScreen(name) {
+    this.screen = name;
+    for (const screen of document.querySelectorAll("[data-multiplayer-screen]")) {
+      screen.classList.toggle("hidden", screen.dataset.multiplayerScreen !== name);
+    }
+    document.querySelector("#multiplayerBox .multiplayer-window")?.classList.toggle("name-mode", name === "name");
+    document.getElementById("createGameBox").classList.add("hidden");
+    this.updateCountdown();
+  }
+  loadSavedName() {
+    const saved = cleanPlayerName(localStorage.getItem(PLAYER_NAME_STORAGE_KEY));
+    if (saved) document.getElementById("multiplayerName").value = saved;
+    document.getElementById("multiplayerLobbyName").textContent = saved || "Choose a name";
+    return saved;
+  }
+  saveName() {
+    const name = cleanPlayerName(document.getElementById("multiplayerName").value);
+    if (!name) {
+      this.status("Enter a name before joining multiplayer.");
+      this.showScreen("name");
+      return "";
+    }
+    localStorage.setItem(PLAYER_NAME_STORAGE_KEY, name);
+    document.getElementById("multiplayerName").value = name;
+    document.getElementById("multiplayerLobbyName").textContent = name;
+    const gameName = document.getElementById("multiplayerGameName");
+    if (!gameName.value.trim()) gameName.value = suggestedGameName(name);
+    return name;
+  }
+  async enterLobby() {
+    if (!this.saveName()) return;
+    this.showScreen("lobby");
+    await this.ensureSocket();
+    this.send({ type: "list-games" });
+    if (this.pendingJoinCode) {
+      document.getElementById("multiplayerRoom").value = this.pendingJoinCode;
+      const code = this.pendingJoinCode;
+      this.pendingJoinCode = "";
+      await this.join(code);
+    }
+  }
   roster() {
     syncGameModeUi();
     const box = document.getElementById("multiplayerRoster");
     box.innerHTML = this.players.map((player) =>
-      `<div>${player.id === this.playerId ? ">" : ""} ${escapeHtml(player.name)}${player.clientId === this.hostId ? " [host]" : ""}</div>`
+      `<div>${player.id === this.playerId ? ">" : ""} ${escapeHtml(player.name)}${player.clientId === this.hostId ? " [host]" : ""}${player.ai ? " [AI]" : ""}</div>`
     ).join("") || "<div>No game joined.</div>";
-    document.getElementById("startRoom").disabled = !this.connected || this.started || this.clientId !== this.hostId || this.players.length < 2;
-    document.getElementById("createRoom").disabled = !this.connected || !!this.room;
-    document.getElementById("joinRoom").disabled = !this.connected || !!this.room;
+    const isHost = this.clientId === this.hostId;
+    document.getElementById("startRoom").disabled = !this.connected || this.started || !isHost || this.players.length < 2;
+    document.getElementById("createRoom").disabled = !this.connected || !!this.room || !!this.joinPending;
+    document.getElementById("openCreateGame").disabled = !this.connected || !!this.room || !!this.joinPending;
     document.getElementById("shareRoom").disabled = !this.room;
     document.getElementById("joinUrl").value = this.shareUrl();
     for (const id of ["multiplayerTank", "multiplayerGameName", "multiplayerPrivate", "multiplayerResolution", "multiplayerWind", "multiplayerCash", "multiplayerRounds"]) {
@@ -2238,53 +2356,126 @@ class MultiplayerSession {
     for (const button of document.querySelectorAll("[data-add-ai]")) {
       button.disabled = !this.room || this.started || this.clientId !== this.hostId || this.players.length >= 8;
     }
+    document.getElementById("startRoom").classList.toggle("hidden", !isHost);
+    document.getElementById("waitingGameCode").textContent = this.private ? `Private Game ${this.room}` : `Game ${this.room}`;
+    document.getElementById("waitingGameTitle").textContent = this.title || "Waiting for players";
+    document.getElementById("waitingOptions").innerHTML = [
+      `${escapeHtml(this.settings.resolution)}`,
+      `Wind ${this.settings.maxWind}`,
+      `$${this.settings.initialCash} cash`,
+      `${this.settings.rounds} rounds`,
+      this.private ? "Private game: no auto-start" : "Public game"
+    ].map((line) => `<span>${line}</span>`).join(" | ");
+    this.updateCountdown();
   }
   gameList() {
     const box = document.getElementById("multiplayerGames");
     box.innerHTML = this.games.map((entry) => `
       <div class="multiplayer-game-row">
-        <span>${entry.code}${entry.title ? ` ${escapeHtml(entry.title)}` : ""} ${entry.players}/8 ${entry.started ? `round ${entry.currentRound}/${entry.rounds}` : "open"} | ${escapeHtml(entry.resolution)} wind ${entry.maxWind} cash ${entry.initialCash} rounds ${entry.rounds} | ${entry.names.map(escapeHtml).join(", ")}</span>
-        <button data-join-game="${entry.code}" ${entry.started || this.started || this.room ? "disabled" : ""}>Join</button>
+        <div class="multiplayer-game-main">
+          <strong>${entry.code}${entry.title ? ` ${escapeHtml(entry.title)}` : ""}</strong>
+          <span>${entry.players}/8 ${entry.started ? `round ${entry.currentRound}/${entry.rounds}` : "open"} | ${escapeHtml(entry.resolution)} | wind ${entry.maxWind} | $${entry.initialCash} | ${entry.rounds} rounds</span>
+          <span class="game-meta">${entry.started ? "playing" : `starts ${formatCountdown(entry.autoStartAt ? entry.autoStartAt - Date.now() : null)}`}</span>
+          <span class="game-meta">Host: ${escapeHtml(entry.host)} | ${entry.names.map(escapeHtml).join(", ")}</span>
+        </div>
+        <button data-join-game="${entry.code}" ${entry.started || this.started || this.room || this.joinPending ? "disabled" : ""}>${this.joinPending?.room === entry.code ? "Joining..." : "Join"}</button>
       </div>
     `).join("") || "<div>No public games.</div>";
   }
-  chat(text) {
-    this.chatLog.push(text);
-    if (this.chatLog.length > 80) this.chatLog.splice(0, this.chatLog.length - 80);
-    document.getElementById("multiplayerChatLog").innerHTML = this.chatLog.map((line) => `<div>${escapeHtml(line)}</div>`).join("");
-    const log = document.getElementById("multiplayerChatLog");
+  appendChat(targetId, lines, text) {
+    lines.push(text);
+    if (lines.length > 80) lines.splice(0, lines.length - 80);
+    document.getElementById(targetId).innerHTML = lines.map((line) => `<div>${escapeHtml(line)}</div>`).join("");
+    const log = document.getElementById(targetId);
     log.scrollTop = log.scrollHeight;
+  }
+  chat(text) {
+    this.appendChat("multiplayerChatLog", this.chatLog, text);
     if (this.started) this.game.addChatMessage(text);
   }
+  lobbyChat(text) {
+    this.appendChat("lobbyChatLog", this.lobbyChatLog, text);
+  }
+  updateCountdown() {
+    if (this.countdownTimer) clearTimeout(this.countdownTimer);
+    this.countdownTimer = null;
+    const waitingText = this.private
+      ? "Private game: no auto-start"
+      : `Auto-start in ${formatCountdown(this.autoStartAt ? this.autoStartAt - Date.now() : null)}`;
+    const waitingEl = document.getElementById("waitingCountdown");
+    if (waitingEl) waitingEl.textContent = waitingText;
+    if (this.screen === "lobby") this.gameList();
+    if ((this.room && !this.started && !this.private && this.autoStartAt) || this.screen === "lobby") {
+      this.countdownTimer = setTimeout(() => this.updateCountdown(), 1000);
+    }
+  }
   ensureSocket() {
-    if (this.socket && this.socket.readyState <= WebSocket.OPEN) return Promise.resolve();
-    return new Promise((resolve, reject) => {
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      if (this.clientId != null) return Promise.resolve();
+      return this.helloReady || Promise.resolve();
+    }
+    if (this.socket?.readyState === WebSocket.CONNECTING && this.socketReady) return this.socketReady;
+    this.helloReady = new Promise((resolve) => {
+      this.resolveHello = resolve;
+    });
+    this.socketReady = new Promise((resolve, reject) => {
       const protocol = location.protocol === "https:" ? "wss:" : "ws:";
       this.socket = new WebSocket(`${protocol}//${location.host}/ws`);
       this.socket.addEventListener("open", () => {
         this.connected = true;
         this.status("Connected. Create or join a game.");
         this.roster();
-        this.send({ type: "list-games" });
-        resolve();
+        resolve(this.helloReady);
       }, { once: true });
-      this.socket.addEventListener("error", () => reject(new Error("WebSocket connection failed.")), { once: true });
+      this.socket.addEventListener("error", () => {
+        this.socketReady = null;
+        this.helloReady = null;
+        this.resolveHello = null;
+        reject(new Error("WebSocket connection failed."));
+      }, { once: true });
       this.socket.addEventListener("close", () => {
+        this.socketReady = null;
+        this.helloReady = null;
+        this.resolveHello = null;
+        this.clearJoinPending();
         this.connected = false;
         this.started = false;
         this.room = "";
+        this.autoStartAt = null;
         this.status("Disconnected.");
         this.roster();
+        this.showScreen(this.name() ? "lobby" : "name");
         setControlsDisabled(false);
       });
       this.socket.addEventListener("message", (event) => this.handle(JSON.parse(event.data)));
     });
+    return this.socketReady.then((hello) => hello);
   }
   send(payload) {
     if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(payload));
   }
+  clearJoinPending() {
+    if (this.joinRetryTimer) clearTimeout(this.joinRetryTimer);
+    this.joinRetryTimer = null;
+    this.joinPending = null;
+    this.gameList();
+    this.roster();
+  }
+  sendJoinPayload(payload, attempt = 1) {
+    this.joinPending = payload;
+    this.status(attempt === 1 ? `Joining game ${payload.room}...` : `Retrying game ${payload.room}...`);
+    this.gameList();
+    this.send(payload);
+    if (this.joinRetryTimer) clearTimeout(this.joinRetryTimer);
+    this.joinRetryTimer = setTimeout(() => {
+      if (!this.joinPending || this.room || attempt >= 3) return;
+      this.sendJoinPayload(payload, attempt + 1);
+    }, 1200);
+  }
   async create() {
     await this.ensureSocket();
+    if (!this.saveName()) return;
+    document.getElementById("createRoom").disabled = true;
     this.send({
       type: "create",
       name: this.name(),
@@ -2297,14 +2488,27 @@ class MultiplayerSession {
       rounds: Number(document.getElementById("multiplayerRounds").value)
     });
   }
-  async join() {
+  async join(code = "") {
     await this.ensureSocket();
-    this.send({
+    if (!this.saveName()) return;
+    this.sendJoinPayload({
       type: "join",
-      room: document.getElementById("multiplayerRoom").value,
+      room: code || document.getElementById("multiplayerRoom").value,
       name: this.name(),
       tankType: Number(document.getElementById("multiplayerTank").value)
     });
+  }
+  leave() {
+    this.send({ type: "leave" });
+    this.room = "";
+    this.players = [];
+    this.autoStartAt = null;
+    this.chatLog = [];
+    document.getElementById("multiplayerChatLog").innerHTML = "";
+    document.getElementById("multiplayerRoom").value = "";
+    this.showScreen("lobby");
+    this.roster();
+    this.send({ type: "list-games" });
   }
   start() {
     this.send({ type: "start" });
@@ -2328,9 +2532,43 @@ class MultiplayerSession {
   addAi(aiType) {
     this.send({ type: "add-ai", aiType });
   }
+  applyActiveRoster(players) {
+    if (!Array.isArray(players) || !this.started) return;
+    const previous = this.game.players;
+    const used = new Set();
+    this.game.players = players.map((entry, index) => {
+      const matchIndex = previous.findIndex((player, oldIndex) => {
+        if (used.has(oldIndex)) return false;
+        if (entry.clientId != null && this.players[oldIndex]?.clientId === entry.clientId) return true;
+        return entry.clientId == null && player.name === entry.name && !!player.ai === !!entry.ai;
+      });
+      const player = matchIndex >= 0
+        ? previous[matchIndex]
+        : new Player(index, entry.name, entry.tankType ?? (index % tankData.length), !!entry.ai, entry.aiType ?? 0);
+      if (matchIndex >= 0) used.add(matchIndex);
+      player.id = index;
+      player.name = entry.name;
+      player.ai = !!entry.ai;
+      player.aiType = Number(entry.aiType) || 0;
+      return player;
+    });
+    if (this.game.active >= this.game.players.length) this.game.active = 0;
+  }
   syncRoster(players, options = {}) {
     if (!Array.isArray(players)) return;
+    if (this.started && players.length !== this.game.players.length) this.applyActiveRoster(players);
     this.players = players;
+    if (!this.started) {
+      this.game.players = players.map((entry, index) => {
+        const player = this.game.players[index] ?? new Player(index, entry.name, entry.tankType ?? (index % tankData.length), !!entry.ai, entry.aiType ?? 0);
+        player.id = index;
+        player.name = entry.name;
+        player.ai = !!entry.ai;
+        player.aiType = Number(entry.aiType) || 0;
+        return player;
+      });
+      if (this.game.active >= this.game.players.length) this.game.active = 0;
+    }
     for (const entry of players) {
       const player = this.game.players[entry.id];
       if (!player) continue;
@@ -2370,6 +2608,7 @@ class MultiplayerSession {
       rounds: Number(message.rounds ?? this.settings.rounds),
       currentRound: Number(message.currentRound ?? this.settings.currentRound)
     };
+    this.autoStartAt = message.autoStartAt ?? null;
     document.getElementById("multiplayerResolution").value = this.settings.resolution;
     document.getElementById("multiplayerGameName").value = this.title;
     document.getElementById("multiplayerPrivate").checked = this.private;
@@ -2378,7 +2617,7 @@ class MultiplayerSession {
     document.getElementById("multiplayerRounds").value = String(this.settings.rounds);
   }
   name() {
-    return document.getElementById("multiplayerName").value.trim() || "Player";
+    return cleanPlayerName(document.getElementById("multiplayerName").value);
   }
   isLocalTurn() {
     if (!this.started) return false;
@@ -2407,12 +2646,20 @@ class MultiplayerSession {
   sendChat(text) {
     this.send({ type: "chat", text });
   }
+  sendLobbyChat(text) {
+    const name = this.name();
+    if (!name) {
+      this.showScreen("name");
+      return;
+    }
+    this.send({ type: "lobby-chat", name, text });
+  }
   readyForNextRound() {
     this.send({ type: "round-ready" });
   }
-  useItem(itemId) {
+  useItem(itemId, arg = null) {
     if (!this.isLocalTurn() || this.game.animating) return;
-    this.send({ type: "use-item", playerId: this.game.active, activeTurnId: this.activeTurnId, itemId });
+    this.send({ type: "use-item", playerId: this.game.active, activeTurnId: this.activeTurnId, itemId, arg });
   }
   sendShopUpdate(player) {
     this.send({
@@ -2462,26 +2709,66 @@ class MultiplayerSession {
   async handle(message) {
     if (message.type === "hello") {
       this.clientId = message.clientId;
+      if (this.resolveHello) this.resolveHello();
+      this.resolveHello = null;
+      this.helloReady = null;
+      this.socketReady = null;
+      this.send({ type: "list-games" });
       return;
     }
     if (message.type === "error") {
+      this.clearJoinPending();
       this.status(message.message);
+      document.getElementById("createRoom").disabled = false;
       return;
     }
     if (message.type === "game-list") {
       this.games = message.games;
       this.gameList();
+      this.updateCountdown();
+      return;
+    }
+    if (message.type === "lobby-chat") {
+      this.lobbyChat(message.text);
+      return;
+    }
+    if (message.type === "left") {
+      this.room = "";
+      this.players = [];
+      this.autoStartAt = null;
+      this.chatLog = [];
+      document.getElementById("multiplayerChatLog").innerHTML = "";
+      this.showScreen("lobby");
+      this.roster();
+      this.gameList();
       return;
     }
     if (message.type === "lobby") {
+      this.clearJoinPending();
       this.room = message.game;
       this.applyIdentity(message);
       this.applySettings(message);
       this.syncRoster(message.players, { replaceStats: true });
       document.getElementById("multiplayerRoom").value = this.room;
       this.status(`${this.private ? "Private " : ""}Game ${this.room}${this.title ? ` (${this.title})` : ""} ready. ${this.settings.resolution}, wind ${this.settings.maxWind}, cash ${this.settings.initialCash}, ${this.settings.rounds} rounds.`);
+      document.getElementById("createGameBox").classList.add("hidden");
+      this.showScreen("waiting");
       this.roster();
       this.gameList();
+      return;
+    }
+    if (message.type === "player-left" && this.started) {
+      this.applyIdentity(message);
+      this.syncRoster(message.players, { replaceStats: true });
+      this.hostId = message.hostId ?? this.hostId;
+      this.game.active = Number(message.active ?? this.game.active);
+      this.activeTurnId = Number(message.activeTurnId ?? this.activeTurnId);
+      const active = this.game.players[this.game.active];
+      this.status(`${message.leftName || "A player"} left game ${this.room}.`);
+      this.roster();
+      this.game.render(active ? `${message.leftName || "A player"} left. ${active.name}'s turn.` : `${message.leftName || "A player"} left.`);
+      setControlsDisabled(false);
+      this.game.scheduleAiTurn();
       return;
     }
     if (message.type === "start") {
@@ -2495,6 +2782,7 @@ class MultiplayerSession {
       this.game.startMultiplayerRound(message);
       this.syncRoster(message.players, { replaceStats: true });
       document.getElementById("multiplayerBox").classList.add("hidden");
+      this.autoStartAt = null;
       this.status(`Game ${this.room} round ${this.settings.currentRound}/${this.settings.rounds}. You are player ${this.playerId + 1}.`);
       this.roster();
       maybeOpenInitialShop();
@@ -2543,7 +2831,7 @@ class MultiplayerSession {
       return;
     }
     if (message.type === "use-item" && this.started) {
-      await applyItemUse(message.playerId, message.itemId);
+      await applyItemUse(message.playerId, message.itemId, message.arg);
       return;
     }
     if (message.type === "aim" && this.started) {
@@ -2632,29 +2920,43 @@ const multiplayer = new MultiplayerSession(game);
 globalThis.multiplayerSession = multiplayer;
 function renderTankIcon(canvas, tankType) {
   const sprite = tankData[tankType];
-  const width = sprite[0].length;
-  const height = sprite.length - 1;
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  ctx.imageSmoothingEnabled = false;
-  ctx.fillStyle = "#6f6f6f";
-  ctx.fillRect(0, 0, width, height);
-  const data = ctx.createImageData(width, height);
-  for (let i = 0; i < width * height; i++) writePixel(data.data, i, rgb(111, 111, 111));
+  const pixels = [];
   for (let row = 1; row < sprite.length; row++) {
     for (let col = 0; col < sprite[row].length; col++) {
-      let color = sprite[row][col];
+      const color = sprite[row][col];
       if (color === 0 || color === TURRET_COLOR) continue;
-      if (color === TANK_COLOR) color = PLAYER_COLORS[0];
-      writePixel(data.data, (row - 1) * width + col, color);
+      pixels.push({ x: col, y: row - 1, color });
     }
   }
-  const x1 = sprite[0][0];
-  const y1 = sprite[0][1];
-  const x2 = x1 + Math.trunc(sprite[0][2] * Math.cos(START_ANGLE * Math.PI / 180));
-  const y2 = y1 - Math.trunc(sprite[0][2] * Math.sin(START_ANGLE * Math.PI / 180));
-  writeLine(data.data, width, height, x1, y1, x2, y2, PLAYER_COLORS[0]);
+  const barrelStartX = sprite[0][0];
+  const barrelStartY = sprite[0][1];
+  const barrelEndX = barrelStartX + Math.trunc(sprite[0][2] * Math.cos(START_ANGLE * Math.PI / 180));
+  const barrelEndY = barrelStartY - Math.trunc(sprite[0][2] * Math.sin(START_ANGLE * Math.PI / 180));
+  const allX = [...pixels.map((pixel) => pixel.x), barrelStartX, barrelEndX];
+  const allY = [...pixels.map((pixel) => pixel.y), barrelStartY, barrelEndY];
+  const minX = Math.min(...allX);
+  const maxX = Math.max(...allX);
+  const minY = Math.min(...allY);
+  const maxY = Math.max(...allY);
+  const pad = 2;
+  canvas.width = maxX - minX + 1 + pad * 2;
+  canvas.height = maxY - minY + 1 + pad * 2;
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  canvas.style.background = "transparent";
+  const xOffset = pad - minX;
+  const yOffset = pad - minY;
+  const data = ctx.createImageData(canvas.width, canvas.height);
+  for (const pixel of pixels) {
+    const iconColor = pixel.color === DARK_GRAY ? rgb(88, 88, 88) : rgb(0, 0, 0);
+    writePixel(data.data, (yOffset + pixel.y) * canvas.width + xOffset + pixel.x, iconColor);
+  }
+  const x1 = xOffset + barrelStartX;
+  const y1 = yOffset + barrelStartY;
+  const x2 = xOffset + barrelEndX;
+  const y2 = yOffset + barrelEndY;
+  writeLine(data.data, canvas.width, canvas.height, x1, y1, x2, y2, rgb(0, 0, 0));
   ctx.putImageData(data, 0, 0);
 }
 
@@ -2748,7 +3050,7 @@ function roundReadoutText() {
 
 function closeTopDialog() {
   if (!document.getElementById("waitingBox").classList.contains("hidden")) return false;
-  for (const id of ["licenseBox", "aboutBox", "inventoryBox", "shopBox", "roundEndBox", "statsBox", "debugBox", "multiplayerBox", "systemMenu", "roundSetup"]) {
+  for (const id of ["createGameBox", "licenseBox", "aboutBox", "inventoryBox", "shopBox", "roundEndBox", "statsBox", "debugBox", "multiplayerBox", "systemMenu", "roundSetup"]) {
     const element = document.getElementById(id);
     if (!element.classList.contains("hidden")) {
       element.classList.add("hidden");
@@ -2916,17 +3218,18 @@ function showInventory() {
 function inventoryAction(item, index, player) {
   if (item.type === "battery") return `<button data-use-item="${index}">Install</button>`;
   if (item.type === "shield") return `<button data-use-item="${index}">Activate</button>`;
-  if (item.type === "fuel") return `<button data-use-item="${index}">Move</button>`;
+  if (item.type === "fuel") return `<span class="shop-row-buttons"><button data-use-item="${index}" data-use-arg="-1">Left</button><button data-use-item="${index}" data-use-arg="1">Right</button></span>`;
   if (item.type === "tracer") return `<button data-use-item="${index}">${player.tracer ? "Stop" : "Use"}</button>`;
-  if (item.type === "parachute") return "auto";
+  if (item.type === "parachute") return `<button data-use-item="${index}" data-use-arg="${player.parachutes > 0 ? 0 : player.items[index]}">${player.parachutes > 0 ? "Stop" : "Use"}</button>`;
   if (item.type === "autodefense") return `<button data-use-item="${index}">${player.autoDefense ? "On" : "Activate"}</button>`;
   return "";
 }
 
-async function applyItemUse(playerId, index) {
+async function applyItemUse(playerId, index, arg = null) {
   const player = game.players[playerId];
   const item = ITEMS[index];
-  if (!player || !item || player.items[index] <= 0) return false;
+  if (!player || !item) return false;
+  if (player.items[index] <= 0 && item.type !== "parachute") return false;
   if (item.type === "battery") {
     player.items[index]--;
     player.powerLimit = Math.min(MAX_POWER, player.powerLimit + item.power);
@@ -2935,10 +3238,21 @@ async function applyItemUse(playerId, index) {
     player.items[index]--;
     player.shield = { strength: item.strength, maxStrength: item.strength, damage: item.damage, thickness: item.thickness };
   } else if (item.type === "fuel") {
-    const dir = player.x < WIDTH / 2 ? 1 : -1;
-    player.x = Math.max(0, Math.min(WIDTH - player.width - 1, player.x + dir * 12));
-    player.items[index] = Math.max(0, player.items[index] - 25);
-    await game.settleOneTank(player, true);
+    const dir = Number(arg) < 0 ? -1 : 1;
+    if (player.items[index] <= 0) return false;
+    const ty = player.y + player.height - 1;
+    const tx = dir === 1 ? player.x + player.width : player.x - 1;
+    if (tx + dir < 0 || tx + dir >= WIDTH || !game.bitmap.isBackground(tx + dir, ty - 1)) return false;
+    player.items[index]--;
+    const baseX = dir === 1
+      ? tx - (player.sprite[0][6] ?? 0)
+      : tx + (player.sprite[0][5] ?? 0);
+    if (!game.bitmap.isBackground(baseX, ty)) player.y--;
+    player.x = Math.max(0, Math.min(WIDTH - player.width - 1, player.x + dir));
+    const fallCount = await game.settleOneTank(player, true, { usingFuel: true });
+    game.applyFallingDamage(player, fallCount);
+  } else if (item.type === "parachute") {
+    player.parachutes = Math.max(0, Math.min(player.items[index], Number(arg) || 0));
   } else if (item.type === "tracer") {
     player.tracer = !player.tracer;
   } else if (item.type === "autodefense") {
@@ -2949,12 +3263,12 @@ async function applyItemUse(playerId, index) {
   return true;
 }
 
-async function useItem(index) {
+async function useItem(index, arg = null) {
   if (multiplayer.started) {
-    multiplayer.useItem(index);
+    multiplayer.useItem(index, arg);
     return;
   }
-  if (await applyItemUse(game.active, index)) showInventory();
+  if (await applyItemUse(game.active, index, arg)) showInventory();
 }
 
 let shopOrders = [];
@@ -3104,10 +3418,14 @@ weaponSelect.addEventListener("change", (event) => {
 });
 initTankPickers();
 document.getElementById("multiplayerBox").classList.remove("hidden");
-const joinCode = new URLSearchParams(location.search).get("join");
-if (joinCode) document.getElementById("multiplayerRoom").value = joinCode.trim().toUpperCase().slice(0, 6);
+const savedMultiplayerName = multiplayer.loadSavedName();
+if (multiplayer.pendingJoinCode) document.getElementById("multiplayerRoom").value = multiplayer.pendingJoinCode;
 multiplayer.roster();
-multiplayer.ensureSocket().catch((error) => multiplayer.status(`${error.message} Use Single Player or start the multiplayer server.`));
+if (savedMultiplayerName && multiplayer.pendingJoinCode) {
+  multiplayer.enterLobby().catch((error) => multiplayer.status(error.message));
+} else {
+  multiplayer.showScreen("name");
+}
 
 function nudgeAngle(amount) {
   const player = game.players[game.active];
@@ -3175,17 +3493,45 @@ document.getElementById("multiplayer").addEventListener("click", () => {
   document.getElementById("multiplayerBox").classList.remove("hidden");
   multiplayer.ensureSocket().catch((error) => multiplayer.status(error.message));
 });
-document.getElementById("closeMultiplayer").addEventListener("click", () => {
-  document.getElementById("multiplayerBox").classList.add("hidden");
-});
 document.getElementById("singlePlayerMode").addEventListener("click", () => {
+  document.getElementById("createGameBox").classList.add("hidden");
   document.getElementById("multiplayerBox").classList.add("hidden");
   document.getElementById("roundSetup").classList.remove("hidden");
 });
+document.getElementById("singlePlayerModeName").addEventListener("click", () => {
+  document.getElementById("createGameBox").classList.add("hidden");
+  document.getElementById("multiplayerBox").classList.add("hidden");
+  document.getElementById("roundSetup").classList.remove("hidden");
+});
+document.getElementById("singlePlayerModeWaiting").addEventListener("click", () => {
+  if (multiplayer.room) multiplayer.leave();
+  document.getElementById("createGameBox").classList.add("hidden");
+  document.getElementById("multiplayerBox").classList.add("hidden");
+  document.getElementById("roundSetup").classList.remove("hidden");
+});
+document.getElementById("continueMultiplayer").addEventListener("click", () => {
+  multiplayer.enterLobby().catch((error) => multiplayer.status(error.message));
+});
+document.getElementById("multiplayerName").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  multiplayer.enterLobby().catch((error) => multiplayer.status(error.message));
+});
+document.getElementById("changeMultiplayerName").addEventListener("click", () => multiplayer.showScreen("name"));
+document.getElementById("openCreateGame").addEventListener("click", () => {
+  if (!multiplayer.saveName()) return;
+  document.getElementById("createRoom").disabled = !multiplayer.connected || !!multiplayer.room;
+  document.getElementById("createGameBox").classList.remove("hidden");
+  document.getElementById("multiplayerGameName").focus();
+  document.getElementById("multiplayerGameName").select();
+});
+document.getElementById("cancelCreateGame").addEventListener("click", () => {
+  document.getElementById("createGameBox").classList.add("hidden");
+});
 document.getElementById("createRoom").addEventListener("click", () => multiplayer.create().catch((error) => multiplayer.status(error.message)));
-document.getElementById("joinRoom").addEventListener("click", () => multiplayer.join().catch((error) => multiplayer.status(error.message)));
 document.getElementById("startRoom").addEventListener("click", () => multiplayer.start());
 document.getElementById("shareRoom").addEventListener("click", () => multiplayer.share());
+document.getElementById("leaveRoom").addEventListener("click", () => multiplayer.leave());
 document.getElementById("joinUrl").addEventListener("focus", (event) => event.target.select());
 document.querySelector(".multiplayer-ai-actions").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-add-ai]");
@@ -3196,11 +3542,19 @@ document.getElementById("multiplayerGames").addEventListener("click", (event) =>
   const button = event.target.closest("button[data-join-game]");
   if (!button) return;
   document.getElementById("multiplayerRoom").value = button.dataset.joinGame;
-  multiplayer.join().catch((error) => multiplayer.status(error.message));
+  multiplayer.join(button.dataset.joinGame).catch((error) => multiplayer.status(error.message));
 });
 document.getElementById("multiplayerChatForm").addEventListener("submit", (event) => {
   event.preventDefault();
   sendChatFromInput(document.getElementById("multiplayerChatInput"));
+});
+document.getElementById("lobbyChatForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = document.getElementById("lobbyChatInput");
+  const text = input.value.trim();
+  if (!text) return;
+  multiplayer.sendLobbyChat(text);
+  input.value = "";
 });
 
 document.getElementById("gameChatForm").addEventListener("submit", (event) => {
@@ -3264,7 +3618,7 @@ document.getElementById("inventoryRows").addEventListener("click", async (event)
       game.render(`${WEAPONS[selected].name} selected.`);
     }
   } else if (button.dataset.useItem !== undefined) {
-    await useItem(Number(button.dataset.useItem));
+    await useItem(Number(button.dataset.useItem), button.dataset.useArg ?? null);
   }
 });
 document.getElementById("shopRows").addEventListener("click", (event) => {

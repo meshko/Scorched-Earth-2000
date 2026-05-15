@@ -464,8 +464,8 @@ select {
 }
 
 .multiplayer-window {
-  width: 500px;
-  max-height: calc(100vh - 24px);
+  width: min(calc(var(--field-width, 800px) + 154px), calc(100vw - 16px));
+  height: min(calc(var(--field-height, 600px) + 18px), calc(100vh - 16px));
   box-sizing: border-box;
   padding: 7px;
   color: #000;
@@ -477,17 +477,54 @@ select {
   border-color: #fff #777 #777 #fff;
 }
 
+.multiplayer-window.name-mode {
+  width: min(430px, calc(100vw - 16px));
+  height: auto;
+}
+
 .multiplayer-panel {
   position: relative;
   z-index: 1;
-  display: grid;
-  grid-template-columns: 72px 1fr;
-  gap: 6px;
-  align-items: center;
+  display: block;
   margin: 8px 4px 10px;
-  max-height: calc(100vh - 92px);
-  overflow: auto;
-  padding-right: 3px;
+  height: calc(100% - 60px);
+  overflow: hidden;
+}
+
+.multiplayer-screen {
+  height: 100%;
+  min-height: 0;
+}
+
+.multiplayer-screen:not(.hidden) {
+  display: grid;
+  gap: 8px;
+}
+
+.multiplayer-screen[data-multiplayer-screen="name"] {
+  grid-template-rows: 1fr auto;
+  align-items: center;
+}
+
+.multiplayer-name-card {
+  display: grid;
+  grid-template-columns: 96px minmax(220px, 360px);
+  gap: 8px;
+  align-items: center;
+  width: min(520px, calc(100% - 24px));
+  box-sizing: border-box;
+  padding: 18px;
+  border: 3px solid;
+  border-color: #777 #fff #fff #777;
+  background: #999;
+}
+
+.multiplayer-name-card .tank-picker {
+  grid-column: 2;
+}
+
+.name-actions-row {
+  justify-self: center;
 }
 
 .multiplayer-panel input {
@@ -525,29 +562,37 @@ select {
   padding: 2px;
   display: grid;
   place-items: center;
-  background: #6f6f6f;
+  background: #c0c0c0;
+  overflow: hidden;
 }
 
 .tank-pick.selected {
   border-color: #555 #fff #fff #555;
-  background: #505050;
+  background: #9a9a9a;
 }
 
 .tank-pick canvas {
   width: auto;
   height: auto;
   image-rendering: pixelated;
+  background: transparent;
 }
 
 .setup-controls .tank-picker {
   grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
 }
 
 .setup-controls .tank-pick {
-  min-height: 24px;
+  width: 34px;
+  height: 34px;
+  min-height: 0;
+  padding: 1px;
 }
 
 .setup-controls .tank-pick canvas {
+  max-width: 30px;
+  max-height: 24px;
   width: auto;
   height: auto;
 }
@@ -558,13 +603,17 @@ select {
 .multiplayer-games,
 .multiplayer-chat-log,
 .multiplayer-chat-form {
-  grid-column: 1 / -1;
+  min-width: 0;
 }
 
 .multiplayer-actions {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 5px;
+}
+
+.multiplayer-bottom-actions {
+  grid-template-columns: 180px 180px;
 }
 
 .multiplayer-status,
@@ -584,7 +633,7 @@ select {
 }
 
 .multiplayer-games {
-  max-height: 132px;
+  min-height: 150px;
   overflow: auto;
 }
 
@@ -593,12 +642,111 @@ select {
   grid-template-columns: 1fr auto;
   gap: 6px;
   align-items: center;
-  margin-bottom: 3px;
+  margin-bottom: 5px;
+  padding: 5px;
+  border: 2px solid #777;
+  background: #aaa;
+}
+
+.multiplayer-game-main {
+  display: grid;
+  grid-template-columns: minmax(80px, 160px) 1fr auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.multiplayer-game-main span {
+  overflow-wrap: anywhere;
+}
+
+.screen-kicker,
+.game-meta {
+  color: #333;
+  font-size: 10px;
+  line-height: 13px;
+  text-transform: uppercase;
+}
+
+.multiplayer-lobby-header,
+.waiting-share {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.waiting-header-actions {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 5px;
+}
+
+.create-game-window {
+  width: min(460px, calc(100vw - 24px));
+  box-sizing: border-box;
+  padding: 7px;
+  color: #000;
+  font-family: Dialog, Arial, Helvetica, sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  background: #c0c0c0;
+  border: 3px solid;
+  border-color: #fff #777 #777 #fff;
+}
+
+.create-game-grid {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 6px;
+  align-items: center;
+  max-height: min(360px, calc(100vh - 130px));
+  margin: 8px 4px 10px;
+  padding-right: 3px;
+  overflow: auto;
+}
+
+.create-game-grid > button,
+.create-game-grid .tank-picker,
+.create-game-grid .checkbox-row {
+  grid-column: 2;
+}
+
+.waiting-options {
+  padding: 6px;
+  border: 3px solid;
+  border-color: #777 #fff #fff #777;
+  background: #999;
+  line-height: 1.35;
+}
+
+.waiting-countdown {
+  padding: 9px;
+  color: #fff;
+  text-align: center;
+  background: #111;
+  border: 3px solid;
+  border-color: #777 #fff #fff #777;
+}
+
+.start-game-button {
+  min-height: 42px;
+  color: #fff;
+  background: #0a7a26;
+  border-color: #75d486 #053d13 #053d13 #75d486;
+  font-size: 16px;
+}
+
+.start-game-button:disabled {
+  color: #ddd;
+  background: #777;
+  border-color: #555;
 }
 
 .multiplayer-chat-log {
-  min-height: 78px;
-  max-height: 120px;
+  min-height: 72px;
   overflow: auto;
   color: #d8d8d8;
   background: #050505;
@@ -609,6 +757,95 @@ select {
   display: grid;
   grid-template-columns: 1fr 52px;
   gap: 5px;
+  width: 100%;
+}
+
+.multiplayer-screen[data-multiplayer-screen="lobby"] {
+  grid-template-rows: auto auto minmax(116px, 1fr) 82px auto auto;
+}
+
+.multiplayer-screen[data-multiplayer-screen="waiting"] {
+  grid-template-areas:
+    "waiting-header"
+    "waiting-countdown"
+    "waiting-share"
+    "waiting-options"
+    "waiting-roster"
+    "waiting-ai"
+    "waiting-start"
+    "waiting-chat"
+    "waiting-form";
+  grid-template-rows: auto auto auto auto minmax(58px, .45fr) auto auto minmax(190px, 1.3fr) auto;
+}
+
+.multiplayer-screen[data-multiplayer-screen="waiting"] .multiplayer-chat-form {
+  grid-template-columns: minmax(0, 1fr) 52px;
+  justify-content: stretch;
+}
+
+.multiplayer-screen[data-multiplayer-screen="waiting"] .multiplayer-lobby-header { grid-area: waiting-header; }
+.multiplayer-screen[data-multiplayer-screen="waiting"] .waiting-countdown { grid-area: waiting-countdown; }
+.multiplayer-screen[data-multiplayer-screen="waiting"] .waiting-share { grid-area: waiting-share; }
+.multiplayer-screen[data-multiplayer-screen="waiting"] .waiting-options { grid-area: waiting-options; }
+.multiplayer-screen[data-multiplayer-screen="waiting"] .multiplayer-roster {
+  grid-area: waiting-roster;
+  min-height: 0;
+  overflow: auto;
+}
+.multiplayer-screen[data-multiplayer-screen="waiting"] .multiplayer-ai-actions { grid-area: waiting-ai; }
+.multiplayer-screen[data-multiplayer-screen="waiting"] .start-game-button { grid-area: waiting-start; }
+.multiplayer-screen[data-multiplayer-screen="waiting"] .multiplayer-chat-log { grid-area: waiting-chat; }
+.multiplayer-screen[data-multiplayer-screen="waiting"] .multiplayer-chat-form { grid-area: waiting-form; }
+
+@media (max-width: 720px) {
+  .multiplayer-window {
+    width: calc(100vw - 10px);
+    height: calc(100vh - 10px);
+  }
+
+  .multiplayer-window.name-mode {
+    width: min(430px, calc(100vw - 10px));
+    height: auto;
+  }
+
+  .multiplayer-name-card,
+  .multiplayer-game-main {
+    grid-template-columns: 1fr;
+  }
+
+  .multiplayer-name-card .tank-picker {
+    grid-column: 1;
+  }
+
+  .create-game-grid {
+    grid-template-columns: 92px minmax(0, 1fr);
+  }
+
+  .create-game-grid > button,
+  .create-game-grid .tank-picker,
+  .create-game-grid .checkbox-row {
+    grid-column: 2;
+  }
+
+  .create-game-grid .tank-picker {
+    grid-template-columns: repeat(6, minmax(24px, 1fr));
+  }
+
+  .create-game-grid .tank-pick {
+    min-height: 22px;
+    padding: 1px;
+  }
+
+  .create-game-grid .tank-pick canvas {
+    width: auto;
+    height: auto;
+  }
+
+  .multiplayer-actions,
+  .multiplayer-ai-actions,
+  .waiting-header-actions {
+    grid-template-columns: 1fr;
+  }
 }
 
 .shop-window {
@@ -743,6 +980,11 @@ select {
   display: flex;
   justify-content: center;
   gap: 6px;
+}
+
+#singlePlayerModeName {
+  min-width: 104px;
+  white-space: nowrap;
 }
 
 .license-window {

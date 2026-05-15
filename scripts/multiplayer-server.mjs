@@ -7,12 +7,14 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../web");
 const port = Number(process.env.PORT || 4174);
 const statsHtmlPath = path.resolve(process.env.SCORCH_STATS_HTML || process.env.STATS_HTML || path.join(root, "stats.html"));
+const AUTO_START_MS = 3 * 60 * 1000;
 const games = new Map();
 const clients = new Set();
 const statsByName = new Map();
 let nextClientId = 1;
 let statsWritePending = false;
 const serverMetrics = {
+  completedGames: 0,
   maxConcurrentGames: 0,
   maxConcurrentPlayers: 0,
   longestGameMs: 0,
@@ -148,6 +150,7 @@ function statsRows() {
 }
 
 function currentGameRows() {
+  const now = Date.now();
   return [...games.values()]
     .sort((a, b) => a.code.localeCompare(b.code))
     .map((game) => {
@@ -157,26 +160,24 @@ function currentGameRows() {
         ? `Round ${game.currentRound} of ${game.rounds}`
         : "Waiting for players";
       const label = game.private ? "Private game" : `${game.code}${game.title ? ` - ${game.title}` : ""}`;
-      return { game, label, status, humanCount, aiCount };
+      const ageMs = now - game.createdAt;
+      return { game, label, status, ageMs, humanCount, aiCount };
     });
 }
 
 function serverSummary() {
   const gameEntries = [...games.values()];
-  const longestOpenGameMs = gameEntries.reduce((longest, game) => {
-    if (!game.startedAt || !game.started) return longest;
-    return Math.max(longest, Date.now() - game.startedAt);
-  }, 0);
   const humans = gameEntries.reduce((sum, game) => sum + game.participants.filter((entry) => entry.kind === "human").length, 0);
   const ais = gameEntries.reduce((sum, game) => sum + game.participants.filter((entry) => entry.kind === "ai").length, 0);
   return {
     games: gameEntries.length,
+    completedGames: serverMetrics.completedGames,
     waiting: gameEntries.filter((game) => !game.started).length,
     playing: gameEntries.filter((game) => game.started).length,
     humans,
     ais,
     connections: clients.size,
-    longestGameMs: Math.max(serverMetrics.longestGameMs, longestOpenGameMs)
+    longestGameMs: serverMetrics.longestGameMs
   };
 }
 
@@ -193,6 +194,7 @@ function formatDuration(ms) {
 function updateConcurrentGameRecord() {
   serverMetrics.maxConcurrentGames = Math.max(serverMetrics.maxConcurrentGames, games.size);
   const humanPlayers = [...games.values()]
+    .filter((game) => game.started)
     .reduce((sum, game) => sum + game.participants.filter((entry) => entry.kind === "human").length, 0);
   serverMetrics.maxConcurrentPlayers = Math.max(serverMetrics.maxConcurrentPlayers, humanPlayers);
 }
@@ -212,6 +214,12 @@ function recordGameDuration(room, endedAt = Date.now()) {
   serverMetrics.longestGameEndedAt = new Date(endedAt).toISOString();
 }
 
+function recordCompletedGame(room, winnerId, endedAt = Date.now()) {
+  serverMetrics.completedGames += 1;
+  recordGameDuration(room, endedAt);
+  recordGameFinished(room, winnerId);
+}
+
 function renderStatsHtml() {
   const generated = new Date().toISOString();
   const summary = serverSummary();
@@ -219,6 +227,7 @@ function renderStatsHtml() {
       <tr>
         <td>${escapeHtml(entry.label)}</td>
         <td>${escapeHtml(entry.status)}</td>
+        <td>${formatDuration(entry.ageMs)}</td>
         <td>${entry.game.resolution}</td>
         <td>${entry.game.maxWind}</td>
         <td>${entry.game.initialCash}</td>
@@ -263,21 +272,22 @@ function renderStatsHtml() {
   <div class="summary">
     <span>Connections: ${summary.connections}</span>
     <span>Games: ${summary.games}</span>
+    <span>Completed games: ${summary.completedGames}</span>
     <span>Waiting: ${summary.waiting}</span>
     <span>Playing: ${summary.playing}</span>
     <span>Human players: ${summary.humans}</span>
     <span>AI players: ${summary.ais}</span>
     <span>Most concurrent games: ${serverMetrics.maxConcurrentGames}</span>
-    <span>Most concurrent players: ${serverMetrics.maxConcurrentPlayers}</span>
+    <span>Most concurrent human players in games: ${serverMetrics.maxConcurrentPlayers}</span>
     <span>Longest game: ${formatDuration(summary.longestGameMs)}${serverMetrics.longestGameLabel ? ` (${escapeHtml(serverMetrics.longestGameLabel)})` : ""}</span>
   </div>
   <h2>Current Games</h2>
   <table class="current-games">
     <thead>
-      <tr><th>Game</th><th>Status</th><th>Resolution</th><th>Wind</th><th>Cash</th><th>Humans</th><th>AI</th><th>Players</th></tr>
+      <tr><th>Game</th><th>Status</th><th>Age</th><th>Resolution</th><th>Wind</th><th>Cash</th><th>Humans</th><th>AI</th><th>Players</th></tr>
     </thead>
     <tbody>
-${gameRows || "      <tr><td colspan=\"8\">No games are running right now.</td></tr>"}
+${gameRows || "      <tr><td colspan=\"9\">No games are running right now.</td></tr>"}
     </tbody>
   </table>
   <h2>Player Standings</h2>
@@ -330,7 +340,7 @@ function broadcast(room, payload) {
 }
 
 function gameList() {
-  return [...games.values()].filter((game) => !game.private).map((game) => ({
+  return [...games.values()].filter((game) => !game.private && !game.started).map((game) => ({
     code: game.code,
     title: game.title,
     private: game.private,
@@ -341,6 +351,7 @@ function gameList() {
     initialCash: game.initialCash,
     rounds: game.rounds,
     currentRound: game.currentRound,
+    autoStartAt: game.autoStartAt,
     host: game.clients.find((client) => client.id === game.hostId)?.name ?? "unknown",
     names: game.participants.map((participant) => participant.name)
   }));
@@ -358,6 +369,7 @@ function roomPlayers(room) {
     tankType: participant.tankType ?? (id % 6),
     ai: participant.kind === "ai",
     aiType: participant.aiType ?? 0,
+    disconnected: !!participant.disconnected,
     weapons: participant.weapons ?? null,
     items: participant.items ?? null,
     cash: participant.cash ?? null,
@@ -375,6 +387,7 @@ function participantForClient(room, client) {
 function activeAuthorized(room, client, playerId = room.active) {
   const active = room.participants[playerId];
   if (!active) return false;
+  if (active.disconnected) return client?.room === room;
   if (active.kind === "human") return active.client === client;
   return active.kind === "ai" && room.hostId === client.id;
 }
@@ -397,6 +410,7 @@ function lobbyState(room, selfClientId = null) {
     initialCash: room.initialCash,
     rounds: room.rounds,
     currentRound: room.currentRound,
+    autoStartAt: room.autoStartAt,
     players: roomPlayers(room),
     started: room.started
   };
@@ -433,6 +447,31 @@ function validGameTitle(value) {
   return String(value || "").trim().slice(0, 32);
 }
 
+function cancelAutoStart(room) {
+  if (room?.autoStartTimer) clearTimeout(room.autoStartTimer);
+  if (!room) return;
+  room.autoStartTimer = null;
+  room.autoStartAt = null;
+}
+
+function addAutoStartOpponent(room) {
+  if (room.participants.length >= 2 || room.participants.length >= 8) return;
+  room.participants.push({ kind: "ai", aiType: 0, name: "Shooter 1", tankType: 0, cash: null, weapons: null, items: null, kills: 0, gain: 0, overallKills: 0, overallGain: 0 });
+  log("game.auto_ai", `game=${room.code} name="Shooter 1"`);
+}
+
+function scheduleAutoStart(room) {
+  cancelAutoStart(room);
+  if (!room || room.private || room.started) return;
+  room.autoStartAt = Date.now() + AUTO_START_MS;
+  room.autoStartTimer = setTimeout(() => {
+    if (!games.has(room.code) || room.started || room.private) return;
+    addAutoStartOpponent(room);
+    log("game.auto_start", `game=${room.code}`);
+    startRoom(room.clients.find((client) => client.id === room.hostId) || room.clients[0], { automatic: true });
+  }, AUTO_START_MS);
+}
+
 function startPayload(room, member, type = "start") {
   return {
     type,
@@ -445,6 +484,7 @@ function startPayload(room, member, type = "start") {
     initialCash: room.initialCash,
     rounds: room.rounds,
     currentRound: room.currentRound,
+    autoStartAt: room.autoStartAt,
     active: room.active,
     activeTurnId: room.activeTurnId,
     hostId: room.hostId,
@@ -452,6 +492,60 @@ function startPayload(room, member, type = "start") {
     selfPlayerId: playerIdForClient(room, member.id),
     players: roomPlayers(room)
   };
+}
+
+function playerLeftPayload(room, member, leftName = "") {
+  return {
+    ...lobbyState(room, member.id),
+    type: "player-left",
+    leftName,
+    active: room.active,
+    activeTurnId: room.activeTurnId
+  };
+}
+
+function applyPendingDisconnects(room, alive = null) {
+  const removed = [];
+  let remappedAlive = Array.isArray(alive) ? [...alive] : null;
+  for (let index = room.participants.length - 1; index >= 0; index--) {
+    const participant = room.participants[index];
+    if (!participant?.disconnected) continue;
+    removed.push({ index, name: participant.name });
+    room.participants.splice(index, 1);
+    if (remappedAlive) {
+      remappedAlive = remappedAlive
+        .filter((id) => id !== index)
+        .map((id) => id > index ? id - 1 : id);
+    }
+    if (room.active > index) room.active -= 1;
+  }
+  if (room.active >= room.participants.length) room.active = 0;
+  return { removed, alive: remappedAlive };
+}
+
+function broadcastTurn(room, checksum = null) {
+  room.activeTurnId += 1;
+  room.lastLateAimKey = "";
+  log("game.turn", `game=${room.code} active=${room.active} activeTurn=${room.activeTurnId} checksum=${checksum ?? "n/a"}`);
+  broadcast(room, { type: "turn", active: room.active, activeTurnId: room.activeTurnId, checksum, players: roomPlayers(room) });
+}
+
+function removeActiveDisconnected(room, leftName = "") {
+  applyPendingDisconnects(room);
+  if (!room.participants.length || !room.clients.length) return;
+  room.turnReports = new Map();
+  if (room.turnReportTimer) clearTimeout(room.turnReportTimer);
+  room.turnReportTimer = null;
+  const active = room.participants[room.active];
+  log("game.disconnect_turn_skip", `game=${room.code} left="${leftName}" next=${room.active}`);
+  broadcast(room, {
+    type: "chat",
+    playerId: null,
+    name: "Server",
+    text: `<Server> ${leftName || "A player"} left; skipping to ${active?.name || "next player"}.`,
+    at: Date.now()
+  });
+  broadcastTurn(room, null);
 }
 
 function createRoom(client, payload) {
@@ -487,6 +581,8 @@ function createRoom(client, payload) {
     lastLateAimKey: "",
     roundEnding: false,
     createdAt: Date.now(),
+    autoStartAt: null,
+    autoStartTimer: null,
     startedAt: null
   };
   client.name = name || "Player 1";
@@ -494,6 +590,7 @@ function createRoom(client, payload) {
   room.clients.push(client);
   room.participants.push({ kind: "human", client, name: client.name, tankType: validTankType(payload.tankType), cash: null, weapons: null, items: null, kills: 0, gain: 0, overallKills: 0, overallGain: 0 });
   games.set(room.code, room);
+  scheduleAutoStart(room);
   updateConcurrentGameRecord();
   log("game.create", `game=${room.code} title="${room.title}" private=${room.private} host=${client.name} resolution=${room.resolution} wind=${room.maxWind} cash=${room.initialCash} rounds=${room.rounds}`);
   send(client.socket, lobbyState(room, client.id));
@@ -540,6 +637,7 @@ function addAi(client, aiType) {
 function startRoom(client) {
   const room = client.room;
   if (!room || room.hostId !== client.id || room.participants.length < 2) return;
+  cancelAutoStart(room);
   room.started = true;
   room.seed = crypto.randomBytes(4).readUInt32BE(0);
   room.active = 0;
@@ -557,6 +655,7 @@ function startRoom(client) {
   room.roundEnding = false;
   room.currentRound = 1;
   room.startedAt = Date.now();
+  updateConcurrentGameRecord();
   log("game.start", `game=${room.code} round=${room.currentRound}/${room.rounds} seed=${room.seed} resolution=${room.resolution} wind=${room.maxWind} cash=${room.initialCash} participants=${room.participants.map((p) => p.name).join(",")}`);
   for (const member of room.clients) send(member.socket, startPayload(room, member));
   broadcastGameList();
@@ -697,7 +796,6 @@ function beginMassKill(room, client) {
 
 function endDesyncedGame(room, reason) {
   if (!room?.started) return;
-  recordGameDuration(room);
   room.started = false;
   if (room.turnReportTimer) clearTimeout(room.turnReportTimer);
   room.turnReportTimer = null;
@@ -765,16 +863,16 @@ function advanceTurn(client, payload) {
     }
     if (statsChanged) scheduleStatsWrite();
   }
-  const alive = Array.isArray(payload.alive) ? payload.alive : room.participants.map((_, id) => id);
+  const removal = applyPendingDisconnects(room, Array.isArray(payload.alive) ? payload.alive : room.participants.map((_, id) => id));
+  const alive = removal.alive ?? room.participants.map((_, id) => id);
   if (alive.length <= 1) {
     room.roundEnding = true;
     if (room.turnReportTimer) clearTimeout(room.turnReportTimer);
     room.turnReportTimer = null;
     const winner = alive.length ? alive[0] : null;
     log("game.round_end", `game=${room.code} round=${room.currentRound}/${room.rounds} winner=${winner ?? "none"} checksum=${payload.checksum ?? "n/a"}`);
-    recordGameDuration(room);
+    if (room.currentRound >= room.rounds) recordCompletedGame(room, winner);
     scheduleStatsWrite();
-    if (room.currentRound >= room.rounds) recordGameFinished(room, winner);
     broadcast(room, {
       type: "round-over",
       winner,
@@ -787,6 +885,7 @@ function advanceTurn(client, payload) {
     if (room.currentRound >= room.rounds) {
       room.started = false;
       log("game.end", `game=${room.code} rounds=${room.rounds}`);
+      cancelAutoStart(room);
       games.delete(room.code);
       for (const member of room.clients) member.room = null;
       room.clients = [];
@@ -806,10 +905,7 @@ function advanceTurn(client, payload) {
     if (alive.includes(next)) break;
   }
   room.active = next;
-  room.activeTurnId += 1;
-  room.lastLateAimKey = "";
-  log("game.turn", `game=${room.code} active=${room.active} activeTurn=${room.activeTurnId} checksum=${payload.checksum ?? "n/a"}`);
-  broadcast(room, { type: "turn", active: room.active, activeTurnId: room.activeTurnId, checksum: payload.checksum ?? null, players: roomPlayers(room) });
+  broadcastTurn(room, payload.checksum ?? null);
 }
 
 function relayChat(client, payload) {
@@ -842,10 +938,29 @@ function relayChat(client, payload) {
   }
 }
 
+function relayLobbyChat(client, payload) {
+  const name = String(payload.name || client.name || "Player").replace(/\s+/g, " ").trim().slice(0, 24) || "Player";
+  const text = String(payload.text || "").replace(/\s+/g, " ").trim().slice(0, 180);
+  if (!text) return;
+  client.name = name;
+  const line = `<${name}> ${text}`;
+  for (const member of clients) send(member.socket, { type: "lobby-chat", name, text: line, at: Date.now() });
+  log("lobby.chat", `${name}: ${text}`);
+}
+
+function leaveRoom(client) {
+  if (!client.room) {
+    send(client.socket, { type: "left" });
+    return;
+  }
+  detach(client);
+  send(client.socket, { type: "left" });
+}
+
 function relayRoundReady(client) {
   const room = client.room;
   if (!room?.started) return;
-  if (room.pendingShop?.has(client.id)) return;
+  if (room.pendingShop?.has(client.id)) room.pendingShop.delete(client.id);
   if (room.initialPreparing) {
     room.initialReady.add(client.id);
     const waiting = waitingClients(room, room.initialReady);
@@ -918,7 +1033,8 @@ function relayUseItem(client, payload) {
     type: "use-item",
     playerId,
     activeTurnId: room.activeTurnId,
-    itemId
+    itemId,
+    arg: payload.arg ?? null
   });
 }
 
@@ -933,6 +1049,8 @@ function handleMessage(client, payload) {
     case "mass-kill": relayMassKill(client, payload); break;
     case "turn-complete": advanceTurn(client, payload); break;
     case "chat": relayChat(client, payload); break;
+    case "lobby-chat": relayLobbyChat(client, payload); break;
+    case "leave": leaveRoom(client); break;
     case "round-ready": relayRoundReady(client); break;
     case "shop-update": relayShop(client, payload); break;
     case "use-item": relayUseItem(client, payload); break;
@@ -978,11 +1096,19 @@ function consumeFrames(client, chunk) {
 function detach(client) {
   const room = client.room;
   if (!room) return;
+  const wasStarted = room.started;
   const index = room.clients.indexOf(client);
   if (index >= 0) room.clients.splice(index, 1);
   const participant = participantForClient(room, client);
-  if (participant) room.participants.splice(room.participants.indexOf(participant), 1);
+  const participantIndex = participant ? room.participants.indexOf(participant) : -1;
+  if (participant && wasStarted) {
+    participant.disconnected = true;
+    participant.client = null;
+  } else if (participantIndex >= 0) {
+    room.participants.splice(participantIndex, 1);
+  }
   if (!room.clients.length) {
+    cancelAutoStart(room);
     games.delete(room.code);
     client.room = null;
     log("game.remove", `game=${room.code}`);
@@ -991,12 +1117,18 @@ function detach(client) {
     return;
   }
   if (room.hostId === client.id) room.hostId = room.clients[0].id;
-  if (room.active >= room.participants.length) room.active = 0;
-  if (room.started && room.participants.filter((participant) => participant.kind === "human").length < 1) {
-    recordGameDuration(room);
-  }
   log("game.leave", `game=${room.code} client=${client.name}`);
-  for (const member of room.clients) send(member.socket, lobbyState(room, member.id));
+  if (wasStarted && participantIndex === room.active && !room.turnReportTimer) {
+    removeActiveDisconnected(room, client.name);
+  } else {
+    if (!wasStarted && participantIndex >= 0 && participantIndex < room.active) room.active -= 1;
+    if (room.active >= room.participants.length) room.active = 0;
+    for (const member of room.clients) {
+      send(member.socket, wasStarted
+        ? playerLeftPayload(room, member, client.name)
+        : lobbyState(room, member.id));
+    }
+  }
   client.room = null;
   broadcastGameList();
   scheduleStatsWrite();

@@ -108,24 +108,91 @@
     <div class="multiplayer-window s-window">
       <div class="window-title">Multiplayer</div>
       <div class="multiplayer-panel">
-        <label for="multiplayerName">Name</label>
-        <input id="multiplayerName" value="Player">
+        <section class="multiplayer-screen" data-multiplayer-screen="name">
+          <div class="multiplayer-name-card">
+            <label for="multiplayerName">Your name</label>
+            <input id="multiplayerName" maxlength="24" autocomplete="nickname" value="">
+            <label for="multiplayerTank">Tank</label>
+            <select id="multiplayerTank" class="tank-select-native">
+              <option value="0">Tank 1</option>
+              <option value="1">Tank 2</option>
+              <option value="2">Tank 3</option>
+              <option value="3">Tank 4</option>
+              <option value="4">Tank 5</option>
+              <option value="5">Tank 6</option>
+            </select>
+            <div class="tank-picker" data-tank-picker="multiplayerTank"></div>
+          </div>
+          <div class="about-buttons name-actions-row">
+            <button id="continueMultiplayer">Continue</button>
+            <button id="singlePlayerModeName">Single Player</button>
+          </div>
+        </section>
+
+        <section class="multiplayer-screen hidden" data-multiplayer-screen="lobby">
+          <div class="multiplayer-lobby-header">
+            <div>
+              <div class="screen-kicker">Public Lobby</div>
+              <div id="multiplayerLobbyName">Player</div>
+            </div>
+            <button id="changeMultiplayerName">Change Name</button>
+          </div>
+          <div class="multiplayer-status" id="multiplayerStatus">Offline</div>
+          <div class="multiplayer-games" id="multiplayerGames"></div>
+          <div class="multiplayer-chat-log" id="lobbyChatLog"></div>
+          <form class="multiplayer-chat-form" id="lobbyChatForm">
+            <input id="lobbyChatInput" maxlength="180" autocomplete="off" placeholder="Lobby chat">
+            <button>Say</button>
+          </form>
+          <div class="multiplayer-actions multiplayer-bottom-actions">
+            <button id="openCreateGame">Create Game</button>
+            <button id="singlePlayerMode">Single Player</button>
+          </div>
+        </section>
+
+        <section class="multiplayer-screen hidden" data-multiplayer-screen="waiting">
+          <div class="multiplayer-lobby-header">
+            <div>
+              <div class="screen-kicker" id="waitingGameCode">Game</div>
+              <div id="waitingGameTitle">Waiting for players</div>
+            </div>
+            <div class="waiting-header-actions">
+              <button id="leaveRoom">Back to Games</button>
+              <button id="singlePlayerModeWaiting">Single Player</button>
+            </div>
+          </div>
+          <div class="waiting-countdown" id="waitingCountdown">Auto-start pending</div>
+          <div class="waiting-share">
+            <input id="joinUrl" readonly>
+            <button id="shareRoom" aria-label="Copy game link" title="Copy game link">Share</button>
+          </div>
+          <input id="multiplayerRoom" class="hidden" maxlength="6">
+          <div class="waiting-options" id="waitingOptions"></div>
+          <div class="multiplayer-roster" id="multiplayerRoster"></div>
+          <div class="multiplayer-actions multiplayer-ai-actions">
+            <button data-add-ai="0">Add Shooter</button>
+            <button data-add-ai="1">Add Cyborg</button>
+            <button data-add-ai="2">Add Killer</button>
+          </div>
+          <button class="start-game-button" id="startRoom">Start Game</button>
+          <div class="multiplayer-chat-log" id="multiplayerChatLog"></div>
+          <form class="multiplayer-chat-form" id="multiplayerChatForm">
+            <input id="multiplayerChatInput" maxlength="180" autocomplete="off" placeholder="Game chat">
+            <button>Say</button>
+          </form>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div class="floating-window hidden" id="createGameBox">
+    <div class="create-game-window s-window">
+      <div class="window-title">Create Game</div>
+      <div class="create-game-grid">
         <label for="multiplayerGameName">Game name</label>
         <input id="multiplayerGameName" maxlength="32" value="">
         <label for="multiplayerPrivate">Private</label>
-        <label class="checkbox-row"><input id="multiplayerPrivate" type="checkbox"> <span>Hide from public list</span></label>
-        <label for="multiplayerTank">Tank</label>
-        <select id="multiplayerTank" class="tank-select-native">
-          <option value="0">Tank 1</option>
-          <option value="1">Tank 2</option>
-          <option value="2">Tank 3</option>
-          <option value="3">Tank 4</option>
-          <option value="4">Tank 5</option>
-          <option value="5">Tank 6</option>
-        </select>
-        <div class="tank-picker" data-tank-picker="multiplayerTank"></div>
-        <label for="multiplayerRoom">Game</label>
-        <input id="multiplayerRoom" maxlength="6">
+        <label class="checkbox-row"><input id="multiplayerPrivate" type="checkbox"> <span>Hide from public list and disable auto-start</span></label>
         <label for="multiplayerResolution">Resolution</label>
         <select id="multiplayerResolution">
           <option value="640x480">640x480</option>
@@ -143,31 +210,10 @@
         <input id="multiplayerCash" type="number" min="0" max="999999" step="1000" value="50000">
         <label for="multiplayerRounds">Rounds</label>
         <input id="multiplayerRounds" type="number" min="1" max="99" step="1" value="3">
-        <div class="multiplayer-actions">
-          <button id="createRoom">Create Game</button>
-          <button id="joinRoom">Join</button>
-          <button id="startRoom">Start</button>
-          <button id="shareRoom">Share Game</button>
-        </div>
-        <label for="joinUrl">Join URL</label>
-        <input id="joinUrl" readonly>
-        <div class="multiplayer-actions multiplayer-ai-actions">
-          <button data-add-ai="0">Add Shooter</button>
-          <button data-add-ai="1">Add Cyborg</button>
-          <button data-add-ai="2">Add Killer</button>
-        </div>
-        <div class="multiplayer-status" id="multiplayerStatus">Offline</div>
-        <div class="multiplayer-games" id="multiplayerGames"></div>
-        <div class="multiplayer-roster" id="multiplayerRoster"></div>
-        <div class="multiplayer-chat-log" id="multiplayerChatLog"></div>
-        <form class="multiplayer-chat-form" id="multiplayerChatForm">
-          <input id="multiplayerChatInput" maxlength="180" autocomplete="off">
-          <button>Say</button>
-        </form>
       </div>
       <div class="about-buttons">
-        <button id="singlePlayerMode">Single Player</button>
-        <button id="closeMultiplayer">Close</button>
+        <button id="createRoom">Create</button>
+        <button id="cancelCreateGame">Cancel</button>
       </div>
     </div>
   </div>
