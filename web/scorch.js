@@ -34,7 +34,8 @@ const WEAPONS = [
   { name: "Napalm", radius: 140, ammo: 0, price: 10000, bundle: 1, kind: "napalm", hot: false },
   { name: "Hot Napalm", radius: 280, ammo: 0, price: 20000, bundle: 1, kind: "napalm", hot: true },
   { name: "MIRV", radius: 25, ammo: 0, price: 35000, bundle: 1, kind: "mirv", particles: 5 },
-  { name: "Death Head", radius: 55, ammo: 0, price: 90000, bundle: 1, kind: "mirv", particles: 9 }
+  { name: "Death Head", radius: 55, ammo: 0, price: 90000, bundle: 1, kind: "mirv", particles: 9 },
+  { name: "Laser", ammo: 0, price: 25000, bundle: 1, kind: "laser", beamWidth: 5, damage: 880 }
 ];
 const ITEMS = [
   { name: "Shield", price: 20000, bundle: 1, max: 0, type: "shield", strength: 1, damage: 0.9, thickness: 1 },
@@ -895,6 +896,11 @@ class ScorchGame {
       this.finishShot("Turn complete.", firedPlayerId);
       return;
     }
+    if (weapon.kind === "laser") {
+      await this.fireLaser(player, weapon);
+      this.finishShot("Turn complete.", firedPlayerId);
+      return;
+    }
     const startX = player.turretX(2);
     const startY = HEIGHT - player.turretY(2);
     const angle = player.angle * Math.PI / 180;
@@ -1038,6 +1044,142 @@ class ScorchGame {
     }
     if (impacts.length) await this.explodeMany(impacts, player);
     this.nextTurn("MIRV complete.");
+  }
+  laserEndpoint(player, weapon) {
+    const startX = player.turretX(2);
+    const startY = player.turretY(2);
+    const angle = player.angle * Math.PI / 180;
+    const range = Math.max(80, Math.round(player.power * 0.9));
+    const dx = Math.cos(angle);
+    const dy = -Math.sin(angle);
+    let endX = startX + dx * range;
+    let endY = startY + dy * range;
+    const scales = [];
+    if (dx > 0) scales.push((WIDTH - 1 - startX) / dx);
+    if (dx < 0) scales.push((0 - startX) / dx);
+    if (dy > 0) scales.push((HEIGHT - 1 - startY) / dy);
+    if (dy < 0) scales.push((0 - startY) / dy);
+    const clip = Math.min(range, ...scales.filter((value) => value >= 0));
+    if (Number.isFinite(clip)) {
+      endX = startX + dx * clip;
+      endY = startY + dy * clip;
+    }
+    return {
+      x1: Math.trunc(startX),
+      y1: Math.trunc(startY),
+      x2: Math.trunc(endX),
+      y2: Math.trunc(endY)
+    };
+  }
+  async fireLaser(player, weapon) {
+    beep(460, 0.08);
+    const beam = this.laserEndpoint(player, weapon);
+    this.render(`${player.name} fires Laser.`);
+    for (let frame = 0; frame < 16; frame++) {
+      this.drawWorld();
+      this.drawLaserBeam(beam, weapon.beamWidth ?? 5, frame);
+      await sleep(frame < 5 ? 28 : 22);
+    }
+    this.carveLaserBeam(beam, weapon.beamWidth ?? 5);
+    const deaths = this.damageLaserPlayers(beam, weapon, player);
+    const minX = Math.max(0, Math.min(beam.x1, beam.x2) - (weapon.beamWidth ?? 5) - 1);
+    const maxX = Math.min(WIDTH, Math.max(beam.x1, beam.x2) + (weapon.beamWidth ?? 5) + 1);
+    this.drop(minX, maxX);
+    await this.settleTanks(player);
+    for (const dead of deaths) await this.randomTankExplosion(dead);
+    this.nextTurn("Laser complete.");
+  }
+  drawLaserBeam(beam, width, frame) {
+    this.ctx.save();
+    this.ctx.lineCap = "round";
+    this.ctx.globalCompositeOperation = "source-over";
+    const colors = ["#ffffff", "#ffff00", "#ff2b00"];
+    const pulse = 0.75 + 0.25 * Math.sin(frame * 1.7);
+    for (let i = width + 4; i >= 1; i -= 2) {
+      const color = colors[Math.min(colors.length - 1, Math.floor((width + 4 - i) / 3))];
+      this.ctx.strokeStyle = color;
+      this.ctx.globalAlpha = i > width ? 0.22 * pulse : 0.9;
+      this.ctx.lineWidth = i;
+      this.ctx.beginPath();
+      this.ctx.moveTo(beam.x1 + 0.5, beam.y1 + 0.5);
+      this.ctx.lineTo(beam.x2 + 0.5, beam.y2 + 0.5);
+      this.ctx.stroke();
+    }
+    this.ctx.globalAlpha = 1;
+    this.ctx.lineWidth = 1;
+    this.ctx.strokeStyle = frame % 2 === 0 ? "#ffffff" : "#ffff66";
+    this.ctx.beginPath();
+    this.ctx.moveTo(beam.x1 + 0.5, beam.y1 + 0.5);
+    this.ctx.lineTo(beam.x2 + 0.5, beam.y2 + 0.5);
+    this.ctx.stroke();
+    this.ctx.restore();
+  }
+  carveLaserBeam(beam, width) {
+    this.bitmap.setColor(null);
+    const radius = Math.max(1, Math.floor(width / 2));
+    this.forEachLaserPoint(beam, (x, y) => this.bitmap.fillCircle(x, y, radius));
+  }
+  damageLaserPlayers(beam, weapon, shooter) {
+    const deaths = [];
+    const radius = Math.max(1, Math.floor((weapon.beamWidth ?? 5) / 2));
+    for (const player of this.players) {
+      if (!player.alive) continue;
+      const hit = this.laserHitsPlayer(beam, radius, player);
+      if (!hit) continue;
+      const center = this.tankCenter(player);
+      const centerDistance = pointToSegmentDistance(center.x, center.y, beam.x1, beam.y1, beam.x2, beam.y2);
+      const damage = Math.max(500, Math.round((weapon.damage ?? 880) - centerDistance * 12));
+      const applied = this.applyDamage(player, damage);
+      if (player !== shooter) this.recordDamage(shooter, player, applied);
+      if (player.powerLimit < MIN_POWER) {
+        player.alive = false;
+        deaths.push(player);
+        this.recordKill(shooter, player);
+      }
+    }
+    return deaths;
+  }
+  laserHitsPlayer(beam, radius, player) {
+    const minX = Math.max(beam.x1, beam.x2) < player.x - radius || Math.min(beam.x1, beam.x2) > player.x + player.width + radius;
+    const minY = Math.max(beam.y1, beam.y2) < player.y - radius || Math.min(beam.y1, beam.y2) > player.y + player.height + radius;
+    if (minX || minY) return false;
+    let hit = false;
+    this.forEachLaserPoint(beam, (x, y) => {
+      if (hit) return;
+      for (let oy = -radius; oy <= radius && !hit; oy++) {
+        for (let ox = -radius; ox <= radius; ox++) {
+          if (ox * ox + oy * oy > radius * radius) continue;
+          const px = x + ox;
+          const py = y + oy;
+          if (px < player.x || py < player.y || px >= player.x + player.width || py >= player.y + player.height) continue;
+          const row = py - player.y + 1;
+          const col = px - player.x;
+          if (player.sprite[row]?.[col]) {
+            hit = true;
+            break;
+          }
+        }
+      }
+    });
+    return hit;
+  }
+  forEachLaserPoint(beam, visit) {
+    let x1 = beam.x1;
+    let y1 = beam.y1;
+    const x2 = beam.x2;
+    const y2 = beam.y2;
+    let dx = Math.abs(x2 - x1);
+    let sx = x1 < x2 ? 1 : -1;
+    let dy = -Math.abs(y2 - y1);
+    let sy = y1 < y2 ? 1 : -1;
+    let err = dx + dy;
+    while (true) {
+      visit(x1, y1);
+      if (x1 === x2 && y1 === y2) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x1 += sx; }
+      if (e2 <= dx) { err += dx; y1 += sy; }
+    }
   }
   async funkyExplosion(x, y, weapon, shooter, completeTurn = true) {
     const colors = [rgb(255, 0, 0), rgb(255, 200, 0), rgb(255, 255, 0), rgb(0, 255, 0), rgb(0, 127, 255), rgb(0, 0, 255)];
@@ -2134,6 +2276,15 @@ function scaleColor(color, scale) {
   const g = Math.max(0, Math.min(255, Math.round(((color >> 8) & 255) * scale)));
   const b = Math.max(0, Math.min(255, Math.round((color & 255) * scale)));
   return rgb(r, g, b);
+}
+
+function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+  const vx = x2 - x1;
+  const vy = y2 - y1;
+  const lengthSq = vx * vx + vy * vy;
+  if (lengthSq === 0) return Math.hypot(px - x1, py - y1);
+  const t = Math.max(0, Math.min(1, ((px - x1) * vx + (py - y1) * vy) / lengthSq));
+  return Math.hypot(px - (x1 + vx * t), py - (y1 + vy * t));
 }
 
 function cssColor(color) {
