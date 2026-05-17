@@ -68,6 +68,8 @@ var autoDefenseMode = false;
 const AI_NAMES = ["Shooter", "Cyborg", "Killer"];
 const AI_ACCURACY = [5, 4, 2];
 const AI_RADIUS_FACTOR = [3.0, 2.0, 1.5];
+const AI_WEAPON_PRICE_CENTER = [0.12, 0.52, 0.86];
+const AI_WEAPON_PRICE_SPREAD = [0.34, 0.36, 0.28];
 
 const tankData = [
   [
@@ -2151,7 +2153,9 @@ class ScorchGame {
     if (this.players[this.active] !== player || this.animating || this.roundOver || autoDefenseMode) return;
     this.animating = true;
     setControlsDisabled(true);
-    const shot = await this.findAiShot(player);
+    const weaponIndex = this.chooseAiWeapon(player);
+    const weapon = WEAPONS[weaponIndex];
+    const shot = await this.findAiShot(player, weapon);
     if (this.players[this.active] !== player || this.roundOver) {
       this.animating = false;
       setControlsDisabled(false);
@@ -2159,19 +2163,51 @@ class ScorchGame {
     }
     player.angle = shot.angle;
     player.power = shot.power;
-    this.weapon = 0;
+    this.weapon = weaponIndex;
     player.lastWeapon = this.weapon;
     player.preferredWeapon = this.weapon;
     document.getElementById("angle").value = String(player.angle);
     document.getElementById("power").value = String(player.power);
-    this.render(`${player.name} fires Missile.`);
+    this.render(`${player.name} fires ${weapon.name}.`);
     this.animating = false;
     if (globalThis.multiplayerSession?.started) globalThis.multiplayerSession.fire();
     else this.fire();
   }
-  async findAiShot(player) {
+  chooseAiWeapon(player) {
+    const choices = WEAPONS
+      .map((weapon, index) => ({ weapon, index, qty: player.weapons[index] ?? 0 }))
+      .filter(({ weapon, qty }) => qty > 0 && weapon.kind !== "laser");
+    if (!choices.length) return usableWeaponIndex(player, 0);
+    if (choices.length === 1) return choices[0].index;
+    const maxPrice = Math.max(1, ...choices.map(({ weapon }) => weapon.price || 0));
+    const center = AI_WEAPON_PRICE_CENTER[player.aiType] ?? 0.45;
+    const spread = AI_WEAPON_PRICE_SPREAD[player.aiType] ?? 0.35;
+    let total = 0;
+    const weighted = choices.map((choice) => {
+      const pricePosition = (choice.weapon.price || 0) / maxPrice;
+      const distance = (pricePosition - center) / spread;
+      const fit = Math.exp(-0.5 * distance * distance);
+      const ammoWeight = choice.weapon.infinite ? 1 : Math.min(2.2, 0.75 + Math.log2(Math.max(1, choice.qty) + 1) * 0.18);
+      const weight = Math.max(0.04, fit) * ammoWeight;
+      total += weight;
+      return { ...choice, weight };
+    });
+    let pick = this.rand.next() * total;
+    for (const choice of weighted) {
+      pick -= choice.weight;
+      if (pick <= 0) return choice.index;
+    }
+    return weighted[weighted.length - 1].index;
+  }
+  aiWeaponRadius(weapon) {
+    if (weapon.kind === "mirv") return Math.round((weapon.radius || 10) * Math.min(3.2, 1 + (weapon.particles || 1) * 0.24));
+    if (weapon.kind === "napalm") return Math.round((weapon.radius || 80) * 0.45);
+    if (weapon.kind === "digger") return Math.max(18, Math.round((weapon.radius || 24) * 0.9));
+    return weapon.radius || 10;
+  }
+  async findAiShot(player, weapon = WEAPONS[0]) {
     const accuracy = AI_ACCURACY[player.aiType] ?? 5;
-    const radius = Math.round(10 * (AI_RADIUS_FACTOR[player.aiType] ?? 2));
+    const radius = Math.round(this.aiWeaponRadius(weapon) * (AI_RADIUS_FACTOR[player.aiType] ?? 2));
     const startAngle = player.angle;
     const startPower = player.power;
     const path = [];
