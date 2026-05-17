@@ -579,13 +579,13 @@ select {
 }
 
 .setup-controls .tank-picker {
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(6, minmax(24px, 1fr));
   gap: 4px;
 }
 
 .setup-controls .tank-pick {
-  width: 34px;
-  height: 34px;
+  width: auto;
+  height: 32px;
   min-height: 0;
   padding: 1px;
 }
@@ -1012,7 +1012,7 @@ select {
 }
 
 .setup-window {
-  width: 210px;
+  width: min(340px, calc(100vw - 16px));
   box-sizing: border-box;
   padding: 8px 8px 12px;
   color: #000;
@@ -1027,11 +1027,20 @@ select {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: 1fr 90px;
+  grid-template-columns: 98px minmax(0, 1fr);
   gap: 6px 8px;
   align-items: center;
   margin: 8px 7px 10px;
   font-size: 12px;
+}
+
+.setup-controls input,
+.setup-controls select {
+  min-width: 0;
+}
+
+.setup-controls .tank-picker {
+  grid-column: 2;
 }
 
 @keyframes credits-scroll {

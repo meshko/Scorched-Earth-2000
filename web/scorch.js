@@ -1,6 +1,6 @@
 "use strict";
 
-const CLIENT_VERSION = "v1.1, 5/11/2026";
+const CLIENT_VERSION = "v1.2, 5/15/2026";
 let WIDTH = 800;
 let HEIGHT = 600;
 const MAX_POWER = 1000;
@@ -339,9 +339,11 @@ class Player {
     this.overallGain = 0;
     this.cash = INITIAL_CASH;
     this.weapons = WEAPONS.map((weapon) => weapon.ammo);
+    this.lastWeapon = 0;
     this.items = ITEMS.map(() => 0);
     this.shield = null;
     this.parachutes = 0;
+    this.falling = false;
     this.tracer = false;
     this.autoDefense = false;
   }
@@ -650,7 +652,7 @@ class ScorchGame {
     this.drawTooltip();
   }
   drawParachute(player) {
-    if (player.parachutes <= 0) return;
+    if (!player.falling || player.parachutes <= 0) return;
     const startX = player.x + Math.floor((player.width - PARACHUTE_ICON[0].length) / 2);
     const startY = player.turretY(0) - PARACHUTE_ICON.length;
     const drawX = Math.max(0, startX);
@@ -885,6 +887,7 @@ class ScorchGame {
     setControlsDisabled(true);
     beep(170, 0.04);
     const weapon = WEAPONS[this.weapon];
+    player.lastWeapon = this.weapon;
     if (!weapon.infinite) player.weapons[this.weapon] = Math.max(0, player.weapons[this.weapon] - 1);
     const useTracer = player.tracer && player.items[5] > 0;
     if (useTracer) {
@@ -960,7 +963,7 @@ class ScorchGame {
   }
   ensureUsableWeapon(player) {
     if ((player.weapons[this.weapon] ?? 0) > 0) return true;
-    this.weapon = 0;
+    this.weapon = usableWeaponIndex(player, player.lastWeapon);
     updateUi(this, "Out of ammo.");
     return false;
   }
@@ -1925,9 +1928,15 @@ class ScorchGame {
     if (damage <= 0) return 0;
     let applied = damage;
     if (player.shield) {
-      player.shield.strength -= player.shield.damage * damage / MAX_POWER;
-      applied = Math.round(damage * (1 - player.shield.damage));
-      if (player.shield.strength <= 0.2) player.shield = null;
+      const shield = player.shield;
+      const absorbed = Math.min(damage * shield.damage, shield.strength * MAX_POWER);
+      shield.strength -= absorbed / MAX_POWER;
+      applied = Math.round(damage - absorbed);
+      if (shield.strength <= 0) player.shield = null;
+      else if (shield.strength < 0.2) {
+        shield.strength = 0;
+        player.shield = null;
+      }
     }
     player.powerLimit -= applied;
     player.power = Math.min(player.power, Math.max(0, player.powerLimit));
@@ -1989,6 +1998,11 @@ class ScorchGame {
     const baseEnd = Math.max(baseStart + 1, player.width - rightBase);
     let direction = 0;
     let fallCount = 0;
+    const finish = () => {
+      player.falling = false;
+      return fallCount;
+    };
+    player.falling = false;
     for (let steps = 0; steps < HEIGHT * 2; steps++) {
       let s = -1;
       let e = -1;
@@ -1999,16 +2013,17 @@ class ScorchGame {
         }
       }
       if (s < 0 && e < 0) {
-        if (player.y + player.height >= HEIGHT - 1) return fallCount;
+        if (player.y + player.height >= HEIGHT - 1) return finish();
         player.y++;
         fallCount++;
+        player.falling = true;
         if (animate && steps % 3 === 0) {
           this.drawWorld();
           await sleep(18);
         }
         continue;
       }
-      if (options.usingFuel) return fallCount;
+      if (options.usingFuel) return finish();
       for (let i = 0; i < player.height && (s < 0 || e < 0); i++) {
         if (!this.bitmap.isBackground(player.x - 1, player.y + i)) {
           s = 0;
@@ -2022,6 +2037,7 @@ class ScorchGame {
       if (s > player.width / 2 && (direction === -1 || direction === 0) && player.x > 0) {
         player.x--;
         fallCount++;
+        player.falling = true;
         direction = -1;
         if (animate && steps % 3 === 0) {
           this.drawWorld();
@@ -2032,6 +2048,7 @@ class ScorchGame {
       if (e < player.width / 2 && (direction === 1 || direction === 0) && player.x + player.width < WIDTH - 1) {
         player.x++;
         fallCount++;
+        player.falling = true;
         direction = 1;
         if (animate && steps % 3 === 0) {
           this.drawWorld();
@@ -2039,9 +2056,9 @@ class ScorchGame {
         }
         continue;
       }
-      return fallCount;
+      return finish();
     }
-    return fallCount;
+    return finish();
   }
   nextTurn(message) {
     const alive = this.players.filter((p) => p.alive);
@@ -2062,7 +2079,7 @@ class ScorchGame {
     const player = this.players[this.active];
     document.getElementById("angle").value = String(player.angle);
     document.getElementById("power").value = String(player.power);
-    if ((player.weapons[this.weapon] ?? 0) <= 0) this.weapon = 0;
+    this.weapon = usableWeaponIndex(player, player.lastWeapon);
     updateUi(this, message);
     this.scheduleAiTurn();
   }
@@ -2071,7 +2088,11 @@ class ScorchGame {
     this.roundRestartTimer = setTimeout(() => {
       this.animating = false;
       setControlsDisabled(false);
-      showRoundEnd();
+      const final = !globalThis.multiplayerSession?.started &&
+        singlePlayerSettings.currentRound >= singlePlayerSettings.rounds;
+      if (final) singlePlayerSettings.gameOver = true;
+      const winner = this.players.find((player) => player.alive);
+      showRoundEnd({ final, winner });
     }, 1400);
   }
   scheduleAiTurn() {
@@ -2094,6 +2115,7 @@ class ScorchGame {
     player.angle = shot.angle;
     player.power = shot.power;
     this.weapon = 0;
+    player.lastWeapon = this.weapon;
     document.getElementById("angle").value = String(player.angle);
     document.getElementById("power").value = String(player.power);
     this.render(`${player.name} fires Missile.`);
@@ -2407,12 +2429,30 @@ function formatCountdown(ms) {
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
+const singlePlayerSettings = {
+  maxWind: PhysicsMaxWind(),
+  initialCash: DEFAULT_INITIAL_CASH,
+  rounds: 1,
+  currentRound: 1,
+  gameOver: false
+};
+
 function suggestedGameName(playerName) {
   const name = cleanPlayerName(playerName) || "Player";
   return `${name}'s game`.slice(0, 32);
 }
 
 const game = new ScorchGame(document.getElementById("field"));
+
+function startNextSinglePlayerRound() {
+  singlePlayerSettings.currentRound = Math.min(
+    singlePlayerSettings.rounds,
+    singlePlayerSettings.currentRound + 1
+  );
+  singlePlayerSettings.gameOver = false;
+  game.newRound();
+}
+
 class MultiplayerSession {
   constructor(game) {
     this.game = game;
@@ -3001,6 +3041,7 @@ class MultiplayerSession {
       player.angle = message.angle;
       player.power = message.power;
       this.game.weapon = message.weapon || 0;
+      player.lastWeapon = this.game.weapon;
       document.getElementById("angle").value = String(player.angle);
       document.getElementById("power").value = String(player.power);
       await this.game.fire();
@@ -3161,7 +3202,9 @@ game.canvas.addEventListener("mouseleave", () => {
 function updateUi(game, message = "") {
   syncGameModeUi();
   const activePlayer = game.players[game.active];
-  if (activePlayer && (activePlayer.weapons[game.weapon] ?? 0) <= 0) game.weapon = 0;
+  if (activePlayer && (activePlayer.weapons[game.weapon] ?? 0) <= 0) {
+    game.weapon = usableWeaponIndex(activePlayer, activePlayer.lastWeapon);
+  }
   const weaponOptions = WEAPONS
     .map((weapon, index) => ({ weapon, index, qty: activePlayer ? activePlayer.weapons[index] : weapon.ammo }))
     .filter(({ qty }) => qty > 0)
@@ -3196,7 +3239,9 @@ function roundReadoutText() {
     const total = Math.max(1, Number(net.settings.rounds) || 1);
     return `Round ${current} out of ${total}`;
   }
-  return "Round 1 out of 1";
+  const current = Math.max(1, Number(singlePlayerSettings.currentRound) || 1);
+  const total = Math.max(1, Number(singlePlayerSettings.rounds) || 1);
+  return `Round ${current} out of ${total}`;
 }
 
 function closeTopDialog() {
@@ -3271,7 +3316,9 @@ function showRoundEnd(options = {}) {
   }
   const nextButton = document.getElementById("playNextRound");
   const shopButton = document.getElementById("goShopping");
-  nextButton.textContent = final ? "Back to games" : "Play next round";
+  nextButton.textContent = final
+    ? (globalThis.multiplayerSession?.started || globalThis.multiplayerSession?.gameOver ? "Back to games" : "New game")
+    : "Play next round";
   shopButton.classList.toggle("hidden", final);
   document.getElementById("roundEndRows").innerHTML = statsRowsHtml(currentStatsPlayers());
   document.getElementById("roundEndBox").classList.remove("hidden");
@@ -3341,6 +3388,11 @@ function toggleDebugConsole() {
 
 function activePlayer(currentGame = game) {
   return currentGame.players[currentGame.active] ?? currentGame.players[0];
+}
+
+function usableWeaponIndex(player, preferred = 0) {
+  if (player && (player.weapons[preferred] ?? 0) > 0) return preferred;
+  return Math.max(0, player?.weapons.findIndex((qty) => qty > 0) ?? 0);
 }
 
 function localHumanPlayer() {
@@ -3460,7 +3512,12 @@ function finishShopSession(player, mode, message, sendUpdate = false) {
       setControlsDisabled(false);
     }
   } else {
-    game.newRound();
+    if (mode === "initial") {
+      game.render(message);
+      setControlsDisabled(false);
+    } else {
+      startNextSinglePlayerRound();
+    }
   }
 }
 
@@ -3531,13 +3588,17 @@ function confirmShop() {
     player.cash -= shopOrders[slot] / ITEMS[i].bundle * ITEMS[i].price;
   }
   const mode = shopMode;
-  const message = mode === "initial" ? "Shopping complete. Waiting for players..." : "Shopping complete. Waiting for next round...";
+  const message = multiplayer.started
+    ? (mode === "initial" ? "Shopping complete. Waiting for players..." : "Shopping complete. Waiting for next round...")
+    : (mode === "initial" ? "Shopping complete." : "Shopping complete. Starting next round...");
   finishShopSession(player, mode, message, true);
 }
 
 function cancelShop() {
   const mode = shopMode;
-  const message = mode === "initial" ? "Shopping skipped. Waiting for players..." : "Shopping skipped. Waiting for next round...";
+  const message = multiplayer.started
+    ? (mode === "initial" ? "Shopping skipped. Waiting for players..." : "Shopping skipped. Waiting for next round...")
+    : (mode === "initial" ? "Shopping skipped." : "Shopping skipped. Starting next round...");
   finishShopSession(shopPlayer, mode, message, false);
 }
 
@@ -3565,6 +3626,8 @@ document.getElementById("clientVersionLabel").textContent = `Scorched Earth 2000
 document.getElementById("aboutVersionLabel").textContent = CLIENT_VERSION;
 weaponSelect.addEventListener("change", (event) => {
   game.weapon = Number(event.target.value);
+  const player = activePlayer();
+  if (player) player.lastWeapon = game.weapon;
   game.render();
 });
 initTankPickers();
@@ -3619,16 +3682,34 @@ document.getElementById("startRound").addEventListener("click", () => {
   const count = Number(document.getElementById("playerCount").value);
   const aiCount = Math.min(Number(document.getElementById("aiCount").value), count - 1);
   const tankType = Number(document.getElementById("tankSelect").value);
+  const maxWind = Number(document.getElementById("singlePlayerWind").value);
+  const initialCash = Number(document.getElementById("singlePlayerCash").value);
+  const rounds = Number(document.getElementById("singlePlayerRounds").value);
   document.getElementById("aiCount").value = String(aiCount);
   game.resize(width, height);
-  game.maxWind = PhysicsMaxWind();
-  INITIAL_CASH = DEFAULT_INITIAL_CASH;
+  game.maxWind = Number.isFinite(maxWind) ? Math.max(0, Math.trunc(maxWind)) : PhysicsMaxWind();
+  INITIAL_CASH = Number.isFinite(initialCash) ? Math.max(0, Math.trunc(initialCash)) : DEFAULT_INITIAL_CASH;
+  singlePlayerSettings.maxWind = game.maxWind;
+  singlePlayerSettings.initialCash = INITIAL_CASH;
+  singlePlayerSettings.rounds = Number.isFinite(rounds) ? Math.max(1, Math.trunc(rounds)) : 1;
+  singlePlayerSettings.currentRound = 1;
+  singlePlayerSettings.gameOver = false;
   game.rebuildPlayers(count, aiCount, tankType);
   game.newRound();
   document.getElementById("roundSetup").classList.add("hidden");
+  if (singlePlayerSettings.initialCash > 0) {
+    setControlsDisabled(true);
+    openShop("initial", localShopPlayers());
+  }
 });
 document.getElementById("cancelRoundSetup").addEventListener("click", () => {
   document.getElementById("roundSetup").classList.add("hidden");
+});
+document.getElementById("switchToMultiplayer").addEventListener("click", () => {
+  document.getElementById("roundSetup").classList.add("hidden");
+  multiplayer.roster();
+  document.getElementById("multiplayerBox").classList.remove("hidden");
+  multiplayer.ensureSocket().catch((error) => multiplayer.status(error.message));
 });
 document.getElementById("angleDown").addEventListener("click", () => nudgeAngle(1));
 document.getElementById("angleUp").addEventListener("click", () => nudgeAngle(-1));
@@ -3763,8 +3844,10 @@ document.getElementById("inventoryRows").addEventListener("click", async (event)
   if (!button) return;
   if (button.dataset.selectWeapon !== undefined) {
     const selected = Number(button.dataset.selectWeapon);
-    if ((activePlayer().weapons[selected] ?? 0) > 0) {
+    const player = activePlayer();
+    if ((player.weapons[selected] ?? 0) > 0) {
       game.weapon = selected;
+      player.lastWeapon = selected;
       document.getElementById("weaponSelect").value = String(selected);
       game.render(`${WEAPONS[selected].name} selected.`);
     }
@@ -3796,8 +3879,12 @@ document.getElementById("playNextRound").addEventListener("click", () => {
     multiplayer.readyForNextRound();
     game.render("Waiting for next round...");
     setControlsDisabled(true);
+  } else if (singlePlayerSettings.gameOver) {
+    singlePlayerSettings.gameOver = false;
+    document.getElementById("roundSetup").classList.remove("hidden");
+    setControlsDisabled(true);
   } else {
-    game.newRound();
+    startNextSinglePlayerRound();
   }
 });
 document.getElementById("goShopping").addEventListener("click", () => {
