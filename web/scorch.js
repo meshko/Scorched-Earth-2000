@@ -61,6 +61,10 @@ const PARACHUTE_ICON = [
 ];
 const DEFAULT_INITIAL_CASH = 50000;
 let INITIAL_CASH = DEFAULT_INITIAL_CASH;
+const UNLIMITED_INVENTORY_AMOUNT = 999;
+var autoDefenseQueue = [];
+var autoDefensePlayer = null;
+var autoDefenseMode = false;
 const AI_NAMES = ["Shooter", "Cyborg", "Killer"];
 const AI_ACCURACY = [5, 4, 2];
 const AI_RADIUS_FACTOR = [3.0, 2.0, 1.5];
@@ -340,6 +344,7 @@ class Player {
     this.cash = INITIAL_CASH;
     this.weapons = WEAPONS.map((weapon) => weapon.ammo);
     this.lastWeapon = 0;
+    this.preferredWeapon = 0;
     this.items = ITEMS.map(() => 0);
     this.shield = null;
     this.parachutes = 0;
@@ -367,6 +372,8 @@ class ScorchGame {
     this.active = 0;
     this.wind = 0;
     this.maxWind = PhysicsMaxWind();
+    this.changingWinds = false;
+    this.unlimitedInventory = false;
     this.weapon = 0;
     this.animating = false;
     this.roundOver = false;
@@ -395,6 +402,7 @@ class ScorchGame {
       players.push(new Player(i, name, tankType, ai, aiType));
     }
     this.players = players;
+    this.applyUnlimitedInventory();
     this.active = 0;
   }
   startMultiplayerRound(config) {
@@ -404,13 +412,26 @@ class ScorchGame {
     const maxWind = Number(config.maxWind);
     const initialCash = Number(config.initialCash);
     this.maxWind = Number.isFinite(maxWind) ? Math.max(0, Math.trunc(maxWind)) : PhysicsMaxWind();
+    this.changingWinds = !!config.changingWinds;
+    this.unlimitedInventory = !!config.unlimitedInventory;
     INITIAL_CASH = Number.isFinite(initialCash) ? Math.max(0, Math.trunc(initialCash)) : DEFAULT_INITIAL_CASH;
-    this.players = config.players.map((entry, index) => new Player(index, entry.name, entry.tankType ?? (index % tankData.length), !!entry.ai, entry.aiType ?? 0));
+    const previousPlayers = this.players;
+    this.players = config.players.map((entry, index) => {
+      const player = new Player(index, entry.name, entry.tankType ?? (index % tankData.length), !!entry.ai, entry.aiType ?? 0);
+      const previous = previousPlayers[index];
+      if (previous && previous.name === player.name && previous.ai === player.ai) {
+        player.lastWeapon = previous.lastWeapon;
+        player.preferredWeapon = previous.preferredWeapon;
+      }
+      return player;
+    });
     this.active = Number(config.active) || 0;
     this.newRound();
+    if (Number.isFinite(Number(config.wind))) this.wind = Number(config.wind);
     this.syncConfiguredStats(config.players);
     this.captureStatsSnapshot();
     this.active = Number(config.active) || 0;
+    this.weapon = preferredWeaponFor(this.players[this.active], this.weapon);
     this.render(`Game ${config.game} started.`);
     setControlsDisabled(false);
   }
@@ -436,6 +457,18 @@ class ScorchGame {
       player.parachutes = Math.min(player.parachutes, player.items[3] || 0);
     }
     if (entry.cash != null) player.cash = Math.max(0, Number(entry.cash) || 0);
+  }
+  applyUnlimitedInventory() {
+    if (!this.unlimitedInventory) return;
+    for (const player of this.players) {
+      player.weapons = WEAPONS.map(() => UNLIMITED_INVENTORY_AMOUNT);
+      player.items = ITEMS.map(() => UNLIMITED_INVENTORY_AMOUNT);
+      player.cash = Math.max(player.cash, INITIAL_CASH);
+    }
+  }
+  randomizeWind() {
+    this.wind = this.maxWind > 0 ? this.rand.int(this.maxWind * 2 + 1) - this.maxWind : 0;
+    return this.wind;
   }
   captureStatsSnapshot() {
     this.statsSnapshot = this.players.map((player) => ({
@@ -472,6 +505,7 @@ class ScorchGame {
     this.image = this.ctx.createImageData(width, height);
   }
   newRound(resetControls = true) {
+    const previousWeapon = this.weapon;
     if (this.roundRestartTimer) {
       clearTimeout(this.roundRestartTimer);
       this.roundRestartTimer = null;
@@ -480,9 +514,10 @@ class ScorchGame {
     this.bitmap = new Bitmap(WIDTH, HEIGHT, this.rand);
     this.groundColor = this.randomBackground();
     this.bitmap.setSandColor(this.groundColor);
-    this.wind = this.maxWind > 0 ? this.rand.int(this.maxWind * 2 + 1) - this.maxWind : 0;
+    this.randomizeWind();
     this.generateTerrain();
     this.tracerTrails = [];
+    this.applyUnlimitedInventory();
     for (const player of this.players) {
       player.alive = true;
       player.powerLimit = MAX_POWER;
@@ -491,10 +526,10 @@ class ScorchGame {
       player.kills = 0;
       player.earnedCash = 0;
       player.shield = null;
-      this.applyAutoDefense(player);
     }
     this.placeTanks();
     this.active = this.players.findIndex((p) => p.alive);
+    this.weapon = preferredWeaponFor(this.players[this.active], previousWeapon);
     this.render("New round.");
     if (resetControls) setControlsDisabled(false);
     this.scheduleAiTurn();
@@ -888,6 +923,7 @@ class ScorchGame {
     beep(170, 0.04);
     const weapon = WEAPONS[this.weapon];
     player.lastWeapon = this.weapon;
+    player.preferredWeapon = this.weapon;
     if (!weapon.infinite) player.weapons[this.weapon] = Math.max(0, player.weapons[this.weapon] - 1);
     const useTracer = player.tracer && player.items[5] > 0;
     if (useTracer) {
@@ -963,7 +999,7 @@ class ScorchGame {
   }
   ensureUsableWeapon(player) {
     if ((player.weapons[this.weapon] ?? 0) > 0) return true;
-    this.weapon = usableWeaponIndex(player, player.lastWeapon);
+    this.weapon = preferredWeaponFor(player, this.weapon);
     updateUi(this, "Out of ammo.");
     return false;
   }
@@ -975,7 +1011,8 @@ class ScorchGame {
     const vx0 = speed * Math.cos(angle);
     const vy0 = speed * Math.sin(angle);
     let step = 0;
-    let prevScreenY = HEIGHT;
+    let prevX = startX;
+    let prevY = HEIGHT - startY;
     let apex = null;
     const mainTrail = useTracer ? [[startX, HEIGHT - startY]] : null;
     if (mainTrail) this.tracerTrails.push(mainTrail);
@@ -990,12 +1027,19 @@ class ScorchGame {
         await this.explode(x, HEIGHT - 1, weapon.radius, player, { ...weapon, kind: "simple" });
         return;
       }
-      if (step > 4 && y > prevScreenY) apex = { x, y, worldY };
+      const hit = y >= 0 && prevY >= 0 && step > 0 ? this.intersectShot(prevX, prevY, x, y) : null;
+      if (hit) {
+        if (mainTrail) mainTrail.push([hit.x, hit.y]);
+        await this.explode(hit.x, hit.y, weapon.radius, player, { ...weapon, kind: "simple" });
+        return;
+      }
+      if (step > 4 && y > prevY) apex = { x, y, worldY };
       if (mainTrail) mainTrail.push([x, y]);
       this.drawWorld();
       this.ctx.fillStyle = "#fff";
       this.ctx.fillRect(x - 1, y - 1, 3, 3);
-      prevScreenY = y;
+      prevX = x;
+      prevY = y;
       step += 2;
       await sleep(18);
     }
@@ -2076,10 +2120,11 @@ class ScorchGame {
     do {
       this.active = (this.active + 1) % this.players.length;
     } while (!this.players[this.active].alive);
+    if (this.changingWinds) this.randomizeWind();
     const player = this.players[this.active];
     document.getElementById("angle").value = String(player.angle);
     document.getElementById("power").value = String(player.power);
-    this.weapon = usableWeaponIndex(player, player.lastWeapon);
+    this.weapon = preferredWeaponFor(player, this.weapon);
     updateUi(this, message);
     this.scheduleAiTurn();
   }
@@ -2097,13 +2142,13 @@ class ScorchGame {
   }
   scheduleAiTurn() {
     const player = this.players[this.active];
-    if (!player || !player.alive || !player.ai || this.animating || this.roundOver) return;
+    if (!player || !player.alive || !player.ai || this.animating || this.roundOver || autoDefenseMode) return;
     const net = globalThis.multiplayerSession;
     if (net?.started && net.clientId !== net.hostId) return;
     setTimeout(() => this.takeAiTurn(player), 650);
   }
   async takeAiTurn(player) {
-    if (this.players[this.active] !== player || this.animating || this.roundOver) return;
+    if (this.players[this.active] !== player || this.animating || this.roundOver || autoDefenseMode) return;
     this.animating = true;
     setControlsDisabled(true);
     const shot = await this.findAiShot(player);
@@ -2116,6 +2161,7 @@ class ScorchGame {
     player.power = shot.power;
     this.weapon = 0;
     player.lastWeapon = this.weapon;
+    player.preferredWeapon = this.weapon;
     document.getElementById("angle").value = String(player.angle);
     document.getElementById("power").value = String(player.power);
     this.render(`${player.name} fires Missile.`);
@@ -2431,6 +2477,8 @@ function formatCountdown(ms) {
 
 const singlePlayerSettings = {
   maxWind: PhysicsMaxWind(),
+  changingWinds: false,
+  unlimitedInventory: false,
   initialCash: DEFAULT_INITIAL_CASH,
   rounds: 1,
   currentRound: 1,
@@ -2451,6 +2499,7 @@ function startNextSinglePlayerRound() {
   );
   singlePlayerSettings.gameOver = false;
   game.newRound();
+  beginAutoDefensePhase();
 }
 
 class MultiplayerSession {
@@ -2467,7 +2516,7 @@ class MultiplayerSession {
     this.games = [];
     this.title = "";
     this.private = false;
-    this.settings = { resolution: "800x600", maxWind: 10, initialCash: DEFAULT_INITIAL_CASH, rounds: 3, currentRound: 0 };
+    this.settings = { resolution: "800x600", maxWind: 10, changingWinds: false, unlimitedInventory: false, initialCash: DEFAULT_INITIAL_CASH, rounds: 3, currentRound: 0 };
     this.activeTurnId = 0;
     this.gameOver = false;
     this.chatLog = [];
@@ -2540,7 +2589,7 @@ class MultiplayerSession {
     document.getElementById("openCreateGame").disabled = !this.connected || !!this.room || !!this.joinPending;
     document.getElementById("shareRoom").disabled = !this.room;
     document.getElementById("joinUrl").value = this.shareUrl();
-    for (const id of ["multiplayerTank", "multiplayerGameName", "multiplayerPrivate", "multiplayerResolution", "multiplayerWind", "multiplayerCash", "multiplayerRounds"]) {
+    for (const id of ["multiplayerTank", "multiplayerGameName", "multiplayerPrivate", "multiplayerResolution", "multiplayerWind", "multiplayerChangingWinds", "multiplayerUnlimitedInventory", "multiplayerCash", "multiplayerRounds"]) {
       document.getElementById(id).disabled = !!this.room || this.started;
     }
     syncTankPickers();
@@ -2552,8 +2601,9 @@ class MultiplayerSession {
     document.getElementById("waitingGameTitle").textContent = this.title || "Waiting for players";
     document.getElementById("waitingOptions").innerHTML = [
       `${escapeHtml(this.settings.resolution)}`,
-      `Wind ${this.settings.maxWind}`,
+      `Wind ${this.settings.maxWind}${this.settings.changingWinds ? " changing" : ""}`,
       `$${this.settings.initialCash} cash`,
+      this.settings.unlimitedInventory ? "Unlimited items" : "Shop inventory",
       `${this.settings.rounds} rounds`,
       this.private ? "Private game: no auto-start" : "Public game"
     ].map((line) => `<span>${line}</span>`).join(" | ");
@@ -2565,7 +2615,7 @@ class MultiplayerSession {
       <div class="multiplayer-game-row">
         <div class="multiplayer-game-main">
           <strong>${entry.code}${entry.title ? ` ${escapeHtml(entry.title)}` : ""}</strong>
-          <span>${entry.players}/8 ${entry.started ? `round ${entry.currentRound}/${entry.rounds}` : "open"} | ${escapeHtml(entry.resolution)} | wind ${entry.maxWind} | $${entry.initialCash} | ${entry.rounds} rounds</span>
+          <span>${entry.players}/8 ${entry.started ? `round ${entry.currentRound}/${entry.rounds}` : "open"} | ${escapeHtml(entry.resolution)} | wind ${entry.maxWind}${entry.changingWinds ? " changing" : ""} | ${entry.unlimitedInventory ? "unlimited items" : `$${entry.initialCash}`} | ${entry.rounds} rounds</span>
           <span class="game-meta">${entry.started ? "playing" : `starts ${formatCountdown(entry.autoStartAt ? entry.autoStartAt - Date.now() : null)}`}</span>
           <span class="game-meta">Host: ${escapeHtml(entry.host)} | ${entry.names.map(escapeHtml).join(", ")}</span>
         </div>
@@ -2675,6 +2725,8 @@ class MultiplayerSession {
       tankType: Number(document.getElementById("multiplayerTank").value),
       resolution: document.getElementById("multiplayerResolution").value,
       maxWind: Number(document.getElementById("multiplayerWind").value),
+      changingWinds: document.getElementById("multiplayerChangingWinds").checked,
+      unlimitedInventory: document.getElementById("multiplayerUnlimitedInventory").checked,
       initialCash: Number(document.getElementById("multiplayerCash").value),
       rounds: Number(document.getElementById("multiplayerRounds").value)
     });
@@ -2795,6 +2847,8 @@ class MultiplayerSession {
     this.settings = {
       resolution: message.resolution || this.settings.resolution,
       maxWind: Number(message.maxWind ?? this.settings.maxWind),
+      changingWinds: !!message.changingWinds,
+      unlimitedInventory: !!message.unlimitedInventory,
       initialCash: Number(message.initialCash ?? this.settings.initialCash),
       rounds: Number(message.rounds ?? this.settings.rounds),
       currentRound: Number(message.currentRound ?? this.settings.currentRound)
@@ -2804,6 +2858,8 @@ class MultiplayerSession {
     document.getElementById("multiplayerGameName").value = this.title;
     document.getElementById("multiplayerPrivate").checked = this.private;
     document.getElementById("multiplayerWind").value = String(this.settings.maxWind);
+    document.getElementById("multiplayerChangingWinds").checked = this.settings.changingWinds;
+    document.getElementById("multiplayerUnlimitedInventory").checked = this.settings.unlimitedInventory;
     document.getElementById("multiplayerCash").value = String(this.settings.initialCash);
     document.getElementById("multiplayerRounds").value = String(this.settings.rounds);
   }
@@ -2848,9 +2904,18 @@ class MultiplayerSession {
   readyForNextRound() {
     this.send({ type: "round-ready" });
   }
-  useItem(itemId, arg = null) {
-    if (!this.isLocalTurn() || this.game.animating) return;
-    this.send({ type: "use-item", playerId: this.game.active, activeTurnId: this.activeTurnId, itemId, arg });
+  autoDefenseReady(player = null) {
+    this.send({
+      type: "auto-defense-ready",
+      weapons: player?.weapons ?? null,
+      items: player?.items ?? null,
+      cash: player?.cash ?? null
+    });
+  }
+  useItem(itemId, arg = null, playerId = this.game.active) {
+    const autoDefenseUse = autoDefenseMode && playerId === this.playerId;
+    if ((!autoDefenseUse && !this.isLocalTurn()) || this.game.animating) return;
+    this.send({ type: "use-item", playerId, activeTurnId: this.activeTurnId, itemId, arg });
   }
   sendShopUpdate(player) {
     this.send({
@@ -2941,7 +3006,7 @@ class MultiplayerSession {
       this.applySettings(message);
       this.syncRoster(message.players, { replaceStats: true });
       document.getElementById("multiplayerRoom").value = this.room;
-      this.status(`${this.private ? "Private " : ""}Game ${this.room}${this.title ? ` (${this.title})` : ""} ready. ${this.settings.resolution}, wind ${this.settings.maxWind}, cash ${this.settings.initialCash}, ${this.settings.rounds} rounds.`);
+      this.status(`${this.private ? "Private " : ""}Game ${this.room}${this.title ? ` (${this.title})` : ""} ready. ${this.settings.resolution}, wind ${this.settings.maxWind}${this.settings.changingWinds ? " changing" : ""}, ${this.settings.unlimitedInventory ? "unlimited items" : `cash ${this.settings.initialCash}`}, ${this.settings.rounds} rounds.`);
       document.getElementById("createGameBox").classList.add("hidden");
       this.showScreen("waiting");
       this.roster();
@@ -3001,12 +3066,23 @@ class MultiplayerSession {
       hideWaitingBox();
       this.activeTurnId = Number(message.activeTurnId ?? this.activeTurnId);
       this.game.active = Number(message.active ?? this.game.active);
+      if (Number.isFinite(Number(message.wind))) this.game.wind = Number(message.wind);
       this.syncRoster(message.players);
       const active = this.game.players[this.game.active];
+      this.game.weapon = preferredWeaponFor(active, this.game.weapon);
       this.status(`Game ${this.room} round ${this.settings.currentRound}/${this.settings.rounds}.`);
       this.game.render(active ? `${active.name}'s turn.` : "Round ready.");
       setControlsDisabled(false);
       this.game.scheduleAiTurn();
+      return;
+    }
+    if (message.type === "auto-defense-start" && this.started) {
+      hideWaitingBox();
+      this.activeTurnId = Number(message.activeTurnId ?? this.activeTurnId);
+      this.game.active = Number(message.active ?? this.game.active);
+      this.syncRoster(message.players);
+      setControlsDisabled(true);
+      beginAutoDefensePhase({ multiplayer: true });
       return;
     }
     if (message.type === "chat") {
@@ -3023,6 +3099,9 @@ class MultiplayerSession {
     }
     if (message.type === "use-item" && this.started) {
       await applyItemUse(message.playerId, message.itemId, message.arg);
+      if (autoDefenseMode && autoDefensePlayer && message.playerId === autoDefensePlayer.id) {
+        showInventory(autoDefensePlayer, { autoDefense: true });
+      }
       return;
     }
     if (message.type === "aim" && this.started) {
@@ -3042,6 +3121,7 @@ class MultiplayerSession {
       player.power = message.power;
       this.game.weapon = message.weapon || 0;
       player.lastWeapon = this.game.weapon;
+      player.preferredWeapon = this.game.weapon;
       document.getElementById("angle").value = String(player.angle);
       document.getElementById("power").value = String(player.power);
       await this.game.fire();
@@ -3058,9 +3138,11 @@ class MultiplayerSession {
     if (message.type === "turn" && this.started) {
       this.activeTurnId = Number(message.activeTurnId ?? this.activeTurnId);
       this.game.active = message.active;
+      if (Number.isFinite(Number(message.wind))) this.game.wind = Number(message.wind);
       this.syncRoster(message.players);
       this.lastChecksum = message.checksum || this.lastChecksum;
       const active = this.game.players[this.game.active];
+      this.game.weapon = preferredWeaponFor(active, this.game.weapon);
       if (active) {
         document.getElementById("angle").value = String(active.angle);
         document.getElementById("power").value = String(active.power);
@@ -3202,9 +3284,7 @@ game.canvas.addEventListener("mouseleave", () => {
 function updateUi(game, message = "") {
   syncGameModeUi();
   const activePlayer = game.players[game.active];
-  if (activePlayer && (activePlayer.weapons[game.weapon] ?? 0) <= 0) {
-    game.weapon = usableWeaponIndex(activePlayer, activePlayer.lastWeapon);
-  }
+  if (activePlayer) game.weapon = preferredWeaponFor(activePlayer, game.weapon);
   const weaponOptions = WEAPONS
     .map((weapon, index) => ({ weapon, index, qty: activePlayer ? activePlayer.weapons[index] : weapon.ammo }))
     .filter(({ qty }) => qty > 0)
@@ -3395,6 +3475,15 @@ function usableWeaponIndex(player, preferred = 0) {
   return Math.max(0, player?.weapons.findIndex((qty) => qty > 0) ?? 0);
 }
 
+function preferredWeaponFor(player, fallback = 0) {
+  if (!player) return fallback;
+  const preferred = Number.isInteger(player.preferredWeapon) ? player.preferredWeapon : player.lastWeapon;
+  if ((player.weapons[preferred] ?? 0) > 0) return preferred;
+  if ((player.weapons[player.lastWeapon] ?? 0) > 0) return player.lastWeapon;
+  if ((player.weapons[fallback] ?? 0) > 0) return fallback;
+  return usableWeaponIndex(player, preferred);
+}
+
 function localHumanPlayer() {
   const net = globalThis.multiplayerSession;
   if (net?.started && net.playerId != null && game.players[net.playerId]) return game.players[net.playerId];
@@ -3406,25 +3495,43 @@ function localShopPlayers() {
   return humans.length ? humans : [game.players[0]].filter(Boolean);
 }
 
-function showInventory() {
-  const player = activePlayer();
-  const weaponRows = WEAPONS.map((weapon, index) => ({ name: weapon.name, qty: player.weapons[index], action: `<button data-select-weapon="${index}">Select</button>` }))
-    .filter((row) => row.qty > 0);
-  const itemRows = ITEMS.map((item, index) => ({ name: item.name, qty: player.items[index], action: inventoryAction(item, index, player) }))
-    .filter((row) => row.qty > 0);
-  document.getElementById("inventoryRows").innerHTML = [...weaponRows, ...itemRows].map((row) => `
+function autoDefenseEligibleItem(item, index) {
+  return item.type !== "fuel" && item.type !== "autodefense";
+}
+
+function canUseAutoDefense(player) {
+  return !!player && (player.items[6] || 0) > 0 && ITEMS.some((item, index) =>
+    autoDefenseEligibleItem(item, index) && (player.items[index] || 0) > 0
+  );
+}
+
+function showInventory(player = activePlayer(), options = {}) {
+  const autoDefense = !!options.autoDefense;
+  const rows = [];
+  const title = document.querySelector("#inventoryBox .window-title");
+  if (title) title.textContent = autoDefense ? `Auto Defense System - ${player.name}` : "Inventory";
+  if (!autoDefense) {
+    rows.push(...WEAPONS.map((weapon, index) => ({ name: weapon.name, qty: player.weapons[index], action: `<button data-select-weapon="${index}">Select</button>` }))
+      .filter((row) => row.qty > 0));
+  }
+  rows.push(...ITEMS.map((item, index) => ({ name: item.name, qty: player.items[index], action: inventoryAction(item, index, player, autoDefense) }))
+    .filter((row) => row.qty > 0 && row.action));
+  document.getElementById("inventoryRows").innerHTML = rows.map((row) => `
     <div class="inventory-grid"><span>${row.name}</span><span>${row.qty}</span><span>${row.action}</span></div>
-  `).join("") || `<div class="inventory-grid"><span>Missile</span><span>999</span><span><button data-select-weapon="0">Select</button></span></div>`;
+  `).join("") || (autoDefense
+    ? `<div class="inventory-grid"><span>No defensive items available</span><span></span><span></span></div>`
+    : `<div class="inventory-grid"><span>Missile</span><span>999</span><span><button data-select-weapon="0">Select</button></span></div>`);
   document.getElementById("inventoryBox").classList.remove("hidden");
 }
 
-function inventoryAction(item, index, player) {
+function inventoryAction(item, index, player, autoDefense = false) {
+  if (autoDefense && !autoDefenseEligibleItem(item, index)) return "";
   if (item.type === "battery") return `<button data-use-item="${index}">Install</button>`;
   if (item.type === "shield") return `<button data-use-item="${index}">Activate</button>`;
-  if (item.type === "fuel") return `<span class="shop-row-buttons"><button data-use-item="${index}" data-use-arg="-1">Left</button><button data-use-item="${index}" data-use-arg="1">Right</button></span>`;
+  if (item.type === "fuel") return autoDefense ? "" : `<span class="shop-row-buttons"><button data-use-item="${index}" data-use-arg="-1">Left</button><button data-use-item="${index}" data-use-arg="1">Right</button></span>`;
   if (item.type === "tracer") return `<button data-use-item="${index}">${player.tracer ? "Stop" : "Use"}</button>`;
   if (item.type === "parachute") return `<button data-use-item="${index}" data-use-arg="${player.parachutes > 0 ? 0 : player.items[index]}">${player.parachutes > 0 ? "Stop" : "Use"}</button>`;
-  if (item.type === "autodefense") return `<button data-use-item="${index}">${player.autoDefense ? "On" : "Activate"}</button>`;
+  if (item.type === "autodefense") return "<span>Ready</span>";
   return "";
 }
 
@@ -3462,16 +3569,86 @@ async function applyItemUse(playerId, index, arg = null) {
     player.autoDefense = true;
   }
   game.render();
-  if (!document.getElementById("inventoryBox").classList.contains("hidden") && player === activePlayer()) showInventory();
+  if (!document.getElementById("inventoryBox").classList.contains("hidden") && player === activePlayer() && !autoDefenseMode) showInventory();
   return true;
 }
 
-async function useItem(index, arg = null) {
+function autoActivateDefaultItems(player) {
+  if (!canUseAutoDefense(player)) return false;
+  player.items[6]--;
+  for (const index of [2, 1, 0]) {
+    if (player.items[index] <= 0) continue;
+    const item = ITEMS[index];
+    player.items[index]--;
+    player.shield = { strength: item.strength, maxStrength: item.strength, damage: item.damage, thickness: item.thickness };
+    break;
+  }
+  if (player.items[3] > 0) player.parachutes = player.items[3];
+  if (player.items[5] > 0) player.tracer = true;
+  return true;
+}
+
+function localAutoDefensePlayers() {
   if (multiplayer.started) {
-    multiplayer.useItem(index, arg);
+    const player = game.players[multiplayer.playerId];
+    return player && !player.ai && canUseAutoDefense(player) ? [player] : [];
+  }
+  return game.players.filter((player) => !player.ai && canUseAutoDefense(player));
+}
+
+function beginAutoDefensePhase(options = {}) {
+  let automaticUse = false;
+  for (const player of game.players) {
+    if (player.ai && autoActivateDefaultItems(player)) automaticUse = true;
+  }
+  autoDefenseQueue = localAutoDefensePlayers();
+  if (!autoDefenseQueue.length) {
+    finishAutoDefensePhase(options.multiplayer, automaticUse);
     return;
   }
-  if (await applyItemUse(game.active, index, arg)) showInventory();
+  autoDefenseMode = true;
+  setControlsDisabled(true);
+  openNextAutoDefensePlayer(options.multiplayer);
+}
+
+function openNextAutoDefensePlayer(multiplayerPhase = false) {
+  autoDefensePlayer = autoDefenseQueue.shift() ?? null;
+  if (!autoDefensePlayer) {
+    finishAutoDefensePhase(multiplayerPhase, true);
+    return;
+  }
+  if (autoDefensePlayer.items[6] > 0) autoDefensePlayer.items[6]--;
+  showInventory(autoDefensePlayer, { autoDefense: true });
+  game.render(`${autoDefensePlayer.name} can enable defensive items.`);
+}
+
+function finishAutoDefensePhase(multiplayerPhase = false, hadOpportunity = true) {
+  document.getElementById("inventoryBox").classList.add("hidden");
+  autoDefenseMode = false;
+  const finishedPlayer = autoDefensePlayer;
+  autoDefensePlayer = null;
+  autoDefenseQueue = [];
+  if (multiplayerPhase) {
+    const player = finishedPlayer ?? game.players[multiplayer.playerId];
+    multiplayer.autoDefenseReady(player);
+    game.render(hadOpportunity ? "Auto defense complete. Waiting for players..." : "Waiting for players...");
+    return;
+  }
+  setControlsDisabled(false);
+  if (hadOpportunity) game.render("Auto defense complete.");
+  else game.render();
+  game.scheduleAiTurn();
+}
+
+async function useItem(index, arg = null, playerId = game.active) {
+  if (multiplayer.started) {
+    multiplayer.useItem(index, arg, playerId);
+    return;
+  }
+  if (await applyItemUse(playerId, index, arg)) {
+    if (autoDefenseMode && autoDefensePlayer) showInventory(autoDefensePlayer, { autoDefense: true });
+    else showInventory();
+  }
 }
 
 let shopOrders = [];
@@ -3514,7 +3691,7 @@ function finishShopSession(player, mode, message, sendUpdate = false) {
   } else {
     if (mode === "initial") {
       game.render(message);
-      setControlsDisabled(false);
+      beginAutoDefensePhase();
     } else {
       startNextSinglePlayerRound();
     }
@@ -3523,7 +3700,7 @@ function finishShopSession(player, mode, message, sendUpdate = false) {
 
 function maybeOpenInitialShop() {
   const net = globalThis.multiplayerSession;
-  if (!net?.started || initialShopOpened || net.settings.currentRound !== 1 || net.settings.initialCash <= 0) return;
+  if (!net?.started || initialShopOpened || net.settings.currentRound !== 1 || net.settings.initialCash <= 0 || net.settings.unlimitedInventory) return;
   const player = localHumanPlayer();
   if (!player || player.ai) return;
   initialShopOpened = true;
@@ -3628,6 +3805,7 @@ weaponSelect.addEventListener("change", (event) => {
   game.weapon = Number(event.target.value);
   const player = activePlayer();
   if (player) player.lastWeapon = game.weapon;
+  if (player) player.preferredWeapon = game.weapon;
   game.render();
 });
 initTankPickers();
@@ -3683,13 +3861,19 @@ document.getElementById("startRound").addEventListener("click", () => {
   const aiCount = Math.min(Number(document.getElementById("aiCount").value), count - 1);
   const tankType = Number(document.getElementById("tankSelect").value);
   const maxWind = Number(document.getElementById("singlePlayerWind").value);
+  const changingWinds = document.getElementById("singlePlayerChangingWinds").checked;
+  const unlimitedInventory = document.getElementById("singlePlayerUnlimitedInventory").checked;
   const initialCash = Number(document.getElementById("singlePlayerCash").value);
   const rounds = Number(document.getElementById("singlePlayerRounds").value);
   document.getElementById("aiCount").value = String(aiCount);
   game.resize(width, height);
   game.maxWind = Number.isFinite(maxWind) ? Math.max(0, Math.trunc(maxWind)) : PhysicsMaxWind();
+  game.changingWinds = changingWinds;
+  game.unlimitedInventory = unlimitedInventory;
   INITIAL_CASH = Number.isFinite(initialCash) ? Math.max(0, Math.trunc(initialCash)) : DEFAULT_INITIAL_CASH;
   singlePlayerSettings.maxWind = game.maxWind;
+  singlePlayerSettings.changingWinds = game.changingWinds;
+  singlePlayerSettings.unlimitedInventory = game.unlimitedInventory;
   singlePlayerSettings.initialCash = INITIAL_CASH;
   singlePlayerSettings.rounds = Number.isFinite(rounds) ? Math.max(1, Math.trunc(rounds)) : 1;
   singlePlayerSettings.currentRound = 1;
@@ -3697,9 +3881,11 @@ document.getElementById("startRound").addEventListener("click", () => {
   game.rebuildPlayers(count, aiCount, tankType);
   game.newRound();
   document.getElementById("roundSetup").classList.add("hidden");
-  if (singlePlayerSettings.initialCash > 0) {
+  if (singlePlayerSettings.initialCash > 0 && !singlePlayerSettings.unlimitedInventory) {
     setControlsDisabled(true);
     openShop("initial", localShopPlayers());
+  } else {
+    beginAutoDefensePhase();
   }
 });
 document.getElementById("cancelRoundSetup").addEventListener("click", () => {
@@ -3837,6 +4023,10 @@ document.getElementById("inventory").addEventListener("click", () => {
   showInventory();
 });
 document.getElementById("closeInventory").addEventListener("click", () => {
+  if (autoDefenseMode) {
+    openNextAutoDefensePlayer(multiplayer.started);
+    return;
+  }
   document.getElementById("inventoryBox").classList.add("hidden");
 });
 document.getElementById("inventoryRows").addEventListener("click", async (event) => {
@@ -3848,11 +4038,12 @@ document.getElementById("inventoryRows").addEventListener("click", async (event)
     if ((player.weapons[selected] ?? 0) > 0) {
       game.weapon = selected;
       player.lastWeapon = selected;
+      player.preferredWeapon = selected;
       document.getElementById("weaponSelect").value = String(selected);
       game.render(`${WEAPONS[selected].name} selected.`);
     }
   } else if (button.dataset.useItem !== undefined) {
-    await useItem(Number(button.dataset.useItem), button.dataset.useArg ?? null);
+    await useItem(Number(button.dataset.useItem), button.dataset.useArg ?? null, autoDefenseMode && autoDefensePlayer ? autoDefensePlayer.id : game.active);
   }
 });
 document.getElementById("shopRows").addEventListener("click", (event) => {

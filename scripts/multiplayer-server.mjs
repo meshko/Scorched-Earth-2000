@@ -348,6 +348,8 @@ function gameList() {
     started: game.started,
     resolution: game.resolution,
     maxWind: game.maxWind,
+    changingWinds: game.changingWinds,
+    unlimitedInventory: game.unlimitedInventory,
     initialCash: game.initialCash,
     rounds: game.rounds,
     currentRound: game.currentRound,
@@ -380,6 +382,46 @@ function roomPlayers(room) {
   }));
 }
 
+function defaultWeapons(unlimitedInventory = false) {
+  return unlimitedInventory ? Array(17).fill(999) : [999, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+}
+
+function defaultItems(unlimitedInventory = false) {
+  return unlimitedInventory ? Array(8).fill(999) : Array(8).fill(0);
+}
+
+function ensureParticipantInventory(room) {
+  for (const participant of room.participants) {
+    if (room.unlimitedInventory || !Array.isArray(participant.weapons)) participant.weapons = defaultWeapons(room.unlimitedInventory);
+    if (room.unlimitedInventory || !Array.isArray(participant.items)) participant.items = defaultItems(room.unlimitedInventory);
+    if (participant.cash == null) participant.cash = room.initialCash;
+  }
+}
+
+function hasAutoDefenseOpportunity(participant) {
+  const items = participant?.items;
+  return Array.isArray(items) && (items[6] || 0) > 0 && items.some((qty, index) =>
+    index !== 6 && index !== 7 && (Number(qty) || 0) > 0
+  );
+}
+
+function autoDefenseClients(room) {
+  return room.participants
+    .filter((participant) => participant.kind === "human" && participant.client && hasAutoDefenseOpportunity(participant))
+    .map((participant) => participant.client.id);
+}
+
+function nextWindSeed(seed) {
+  return (Math.imul(1664525, seed >>> 0) + 1013904223) >>> 0;
+}
+
+function drawRoomWind(room) {
+  const maxWind = Number(room.maxWind) || 0;
+  if (maxWind <= 0) return 0;
+  room.windSeed = nextWindSeed(room.windSeed ?? room.seed ?? 0);
+  return Math.floor((room.windSeed / 0x100000000) * (maxWind * 2 + 1)) - maxWind;
+}
+
 function participantForClient(room, client) {
   return room.participants.find((participant) => participant.client === client);
 }
@@ -407,6 +449,8 @@ function lobbyState(room, selfClientId = null) {
     selfPlayerId: playerIdForClient(room, selfClientId),
     resolution: room.resolution,
     maxWind: room.maxWind,
+    changingWinds: room.changingWinds,
+    unlimitedInventory: room.unlimitedInventory,
     initialCash: room.initialCash,
     rounds: room.rounds,
     currentRound: room.currentRound,
@@ -481,6 +525,9 @@ function startPayload(room, member, type = "start") {
     seed: room.seed,
     resolution: room.resolution,
     maxWind: room.maxWind,
+    wind: room.wind,
+    changingWinds: room.changingWinds,
+    unlimitedInventory: room.unlimitedInventory,
     initialCash: room.initialCash,
     rounds: room.rounds,
     currentRound: room.currentRound,
@@ -526,8 +573,9 @@ function applyPendingDisconnects(room, alive = null) {
 function broadcastTurn(room, checksum = null) {
   room.activeTurnId += 1;
   room.lastLateAimKey = "";
-  log("game.turn", `game=${room.code} active=${room.active} activeTurn=${room.activeTurnId} checksum=${checksum ?? "n/a"}`);
-  broadcast(room, { type: "turn", active: room.active, activeTurnId: room.activeTurnId, checksum, players: roomPlayers(room) });
+  if (room.changingWinds) room.wind = drawRoomWind(room);
+  log("game.turn", `game=${room.code} active=${room.active} activeTurn=${room.activeTurnId} wind=${room.wind ?? "n/a"} checksum=${checksum ?? "n/a"}`);
+  broadcast(room, { type: "turn", active: room.active, activeTurnId: room.activeTurnId, checksum, wind: room.wind, players: roomPlayers(room) });
 }
 
 function removeActiveDisconnected(room, leftName = "") {
@@ -565,6 +613,8 @@ function createRoom(client, payload) {
     seed: null,
     resolution: validResolution(payload.resolution),
     maxWind: validMaxWind(payload.maxWind),
+    changingWinds: !!payload.changingWinds,
+    unlimitedInventory: !!payload.unlimitedInventory,
     initialCash: validInitialCash(payload.initialCash),
     rounds: validRounds(payload.rounds),
     currentRound: 0,
@@ -583,7 +633,11 @@ function createRoom(client, payload) {
     createdAt: Date.now(),
     autoStartAt: null,
     autoStartTimer: null,
-    startedAt: null
+    startedAt: null,
+    autoDefensePreparing: false,
+    autoDefenseReady: new Set(),
+    windSeed: 0,
+    wind: 0
   };
   client.name = name || "Player 1";
   client.room = room;
@@ -592,7 +646,7 @@ function createRoom(client, payload) {
   games.set(room.code, room);
   scheduleAutoStart(room);
   updateConcurrentGameRecord();
-  log("game.create", `game=${room.code} title="${room.title}" private=${room.private} host=${client.name} resolution=${room.resolution} wind=${room.maxWind} cash=${room.initialCash} rounds=${room.rounds}`);
+  log("game.create", `game=${room.code} title="${room.title}" private=${room.private} host=${client.name} resolution=${room.resolution} wind=${room.maxWind} changingWinds=${room.changingWinds} unlimitedInventory=${room.unlimitedInventory} cash=${room.initialCash} rounds=${room.rounds}`);
   send(client.socket, lobbyState(room, client.id));
   broadcastGameList();
   scheduleStatsWrite();
@@ -640,6 +694,8 @@ function startRoom(client) {
   cancelAutoStart(room);
   room.started = true;
   room.seed = crypto.randomBytes(4).readUInt32BE(0);
+  room.windSeed = room.seed;
+  room.wind = drawRoomWind(room);
   room.active = 0;
   room.activeTurnId = 1;
   room.turnId = 0;
@@ -647,7 +703,10 @@ function startRoom(client) {
   room.roundReady = new Set();
   room.initialReady = new Set();
   room.pendingShop = new Set(room.clients.map((member) => member.id));
-  room.initialPreparing = room.initialCash > 0;
+  ensureParticipantInventory(room);
+  room.initialPreparing = room.initialCash > 0 && !room.unlimitedInventory;
+  room.autoDefensePreparing = false;
+  room.autoDefenseReady = new Set();
   room.massKillPendingBy = null;
   room.lastLateAimKey = "";
   if (room.turnReportTimer) clearTimeout(room.turnReportTimer);
@@ -656,8 +715,9 @@ function startRoom(client) {
   room.currentRound = 1;
   room.startedAt = Date.now();
   updateConcurrentGameRecord();
-  log("game.start", `game=${room.code} round=${room.currentRound}/${room.rounds} seed=${room.seed} resolution=${room.resolution} wind=${room.maxWind} cash=${room.initialCash} participants=${room.participants.map((p) => p.name).join(",")}`);
+  log("game.start", `game=${room.code} round=${room.currentRound}/${room.rounds} seed=${room.seed} resolution=${room.resolution} wind=${room.maxWind} changingWinds=${room.changingWinds} unlimitedInventory=${room.unlimitedInventory} cash=${room.initialCash} participants=${room.participants.map((p) => p.name).join(",")}`);
   for (const member of room.clients) send(member.socket, startPayload(room, member));
+  if (!room.initialPreparing) beginAutoDefenseIfNeeded(room);
   broadcastGameList();
   scheduleStatsWrite();
 }
@@ -666,6 +726,8 @@ function startNextRound(room) {
   if (!room.started || room.currentRound >= room.rounds) return;
   room.currentRound += 1;
   room.seed = crypto.randomBytes(4).readUInt32BE(0);
+  room.windSeed = room.seed;
+  room.wind = drawRoomWind(room);
   room.active = 0;
   room.activeTurnId += 1;
   room.turnId = 0;
@@ -674,20 +736,24 @@ function startNextRound(room) {
   room.initialReady = new Set();
   room.pendingShop = new Set(room.clients.map((member) => member.id));
   room.initialPreparing = false;
+  room.autoDefensePreparing = false;
+  room.autoDefenseReady = new Set();
   room.massKillPendingBy = null;
   room.lastLateAimKey = "";
   if (room.turnReportTimer) clearTimeout(room.turnReportTimer);
   room.turnReportTimer = null;
   room.roundEnding = false;
+  ensureParticipantInventory(room);
   log("game.round_start", `game=${room.code} round=${room.currentRound}/${room.rounds} seed=${room.seed}`);
   for (const member of room.clients) send(member.socket, startPayload(room, member, "round-start"));
+  beginAutoDefenseIfNeeded(room);
   broadcastGameList();
   scheduleStatsWrite();
 }
 
 function relayAim(client, payload) {
   const room = client.room;
-  if (!room?.started || room.roundEnding || room.initialPreparing) return;
+  if (!room?.started || room.roundEnding || room.initialPreparing || room.autoDefensePreparing) return;
   const playerId = Number(payload.playerId ?? room.participants.indexOf(participantForClient(room, client)));
   const activeTurnId = Number(payload.activeTurnId ?? room.activeTurnId);
   if (activeTurnId !== room.activeTurnId) {
@@ -713,7 +779,7 @@ function relayAim(client, payload) {
 
 function relayFire(client, payload) {
   const room = client.room;
-  if (!room?.started || room.roundEnding || room.initialPreparing) return;
+  if (!room?.started || room.roundEnding || room.initialPreparing || room.autoDefensePreparing) return;
   const playerId = Number(payload.playerId ?? room.participants.indexOf(participantForClient(room, client)));
   const activeTurnId = Number(payload.activeTurnId ?? room.activeTurnId);
   if (activeTurnId !== room.activeTurnId) {
@@ -760,7 +826,7 @@ function beginTurnReport(room) {
 
 function relayMassKill(client, payload) {
   const room = client.room;
-  if (!room?.started || room.roundEnding || room.initialPreparing) return;
+  if (!room?.started || room.roundEnding || room.initialPreparing || room.autoDefensePreparing) return;
   if (client.id !== room.hostId) {
     log("game.mass_kill_ignored", `game=${room.code} from=${client.name || client.id} reason=not_host`);
     return;
@@ -968,7 +1034,7 @@ function relayRoundReady(client) {
     if (!waiting.length) {
       room.initialPreparing = false;
       room.initialReady = new Set();
-      broadcast(room, { type: "round-ready-complete", active: room.active, activeTurnId: room.activeTurnId, players: roomPlayers(room) });
+      beginAutoDefenseIfNeeded(room);
     } else {
       broadcastRoundWaiting(room, room.initialReady, waiting);
     }
@@ -980,6 +1046,60 @@ function relayRoundReady(client) {
   log("game.round_ready", `game=${room.code} client=${client.name || client.id} waiting=${waiting.map((member) => member.name || member.id).join(",") || "none"}`);
   if (!waiting.length) startNextRound(room);
   else broadcastRoundWaiting(room, room.roundReady, waiting);
+}
+
+function beginAutoDefenseIfNeeded(room) {
+  ensureParticipantInventory(room);
+  const readyClients = autoDefenseClients(room);
+  if (!readyClients.length) {
+    room.autoDefensePreparing = false;
+    room.autoDefenseReady = new Set();
+    broadcast(room, { type: "round-ready-complete", active: room.active, activeTurnId: room.activeTurnId, wind: room.wind, players: roomPlayers(room) });
+    return false;
+  }
+  room.autoDefensePreparing = true;
+  room.autoDefenseReady = new Set();
+  log("game.auto_defense_start", `game=${room.code} waiting=${readyClients.join(",")}`);
+  const waiting = room.clients
+    .filter((member) => readyClients.includes(member.id))
+    .map((member) => ({ clientId: member.id, name: member.name || `Player ${member.id}` }));
+  for (const member of room.clients) {
+    send(member.socket, readyClients.includes(member.id)
+      ? {
+          type: "auto-defense-start",
+          active: room.active,
+          activeTurnId: room.activeTurnId,
+          players: roomPlayers(room)
+        }
+      : {
+          type: "round-waiting",
+          readyClientIds: [],
+          waiting
+        });
+  }
+  return true;
+}
+
+function relayAutoDefenseReady(client, payload) {
+  const room = client.room;
+  if (!room?.started || !room.autoDefensePreparing) return;
+  const playerId = playerIdForClient(room, client.id);
+  if (playerId >= 0) {
+    const participant = room.participants[playerId];
+    if (Array.isArray(payload.weapons)) participant.weapons = payload.weapons.map((value) => Math.max(0, Number(value) || 0));
+    if (Array.isArray(payload.items)) participant.items = payload.items.map((value) => Math.max(0, Number(value) || 0));
+    if (payload.cash != null) participant.cash = Math.max(0, Number(payload.cash) || 0);
+  }
+  room.autoDefenseReady.add(client.id);
+  const waitingIds = autoDefenseClients(room).filter((id) => !room.autoDefenseReady.has(id));
+  log("game.auto_defense_ready", `game=${room.code} client=${client.name || client.id} waiting=${waitingIds.join(",") || "none"}`);
+  if (waitingIds.length) {
+    broadcastRoundWaiting(room, room.autoDefenseReady, room.clients.filter((member) => waitingIds.includes(member.id)));
+    return;
+  }
+  room.autoDefensePreparing = false;
+  room.autoDefenseReady = new Set();
+  broadcast(room, { type: "round-ready-complete", active: room.active, activeTurnId: room.activeTurnId, wind: room.wind, players: roomPlayers(room) });
 }
 
 function waitingClients(room, readySet) {
@@ -1024,7 +1144,8 @@ function relayUseItem(client, payload) {
     log("game.use_item_late", `game=${room.code} from=${client.name || client.id} player=${playerId} active=${room.active} activeTurn=${activeTurnId}/${room.activeTurnId}`);
     return;
   }
-  if (playerId !== room.active || !activeAuthorized(room, client, playerId)) return;
+  const autoDefenseUse = room.autoDefensePreparing && playerId === playerIdForClient(room, client.id);
+  if (!autoDefenseUse && (playerId !== room.active || !activeAuthorized(room, client, playerId))) return;
   const itemId = Number(payload.itemId);
   const participant = room.participants[playerId];
   if (!participant || !Number.isInteger(itemId) || itemId < 0) return;
@@ -1052,6 +1173,7 @@ function handleMessage(client, payload) {
     case "lobby-chat": relayLobbyChat(client, payload); break;
     case "leave": leaveRoom(client); break;
     case "round-ready": relayRoundReady(client); break;
+    case "auto-defense-ready": relayAutoDefenseReady(client, payload); break;
     case "shop-update": relayShop(client, payload); break;
     case "use-item": relayUseItem(client, payload); break;
     case "list-games": send(client.socket, { type: "game-list", games: gameList() }); break;
