@@ -387,7 +387,7 @@ function defaultWeapons(unlimitedInventory = false) {
 }
 
 function defaultItems(unlimitedInventory = false) {
-  return unlimitedInventory ? Array(8).fill(999) : Array(8).fill(0);
+  return unlimitedInventory ? Array(9).fill(999) : Array(9).fill(0);
 }
 
 function ensureParticipantInventory(room) {
@@ -401,7 +401,7 @@ function ensureParticipantInventory(room) {
 function hasAutoDefenseOpportunity(participant) {
   const items = participant?.items;
   return Array.isArray(items) && (items[6] || 0) > 0 && items.some((qty, index) =>
-    index !== 6 && index !== 7 && (Number(qty) || 0) > 0
+    index !== 6 && index !== 8 && (Number(qty) || 0) > 0
   );
 }
 
@@ -877,6 +877,8 @@ function endDesyncedGame(room, reason) {
     type: "desync",
     message: "Game ended because clients are out of sync.",
     reason,
+    active: room.active,
+    activeTurnId: room.activeTurnId,
     players: roomPlayers(room)
   });
   broadcastGameList();
@@ -899,7 +901,14 @@ function advanceTurn(client, payload) {
   const checksums = [...room.turnReports.values()].map((report) => report.checksum);
   const uniqueChecksums = new Set(checksums);
   if (uniqueChecksums.size > 1) {
-    const detail = [...room.turnReports.values()].map((report) => `${report.client.name || report.client.id}:${report.checksum}`).join(",");
+    const detail = [...room.turnReports.values()].map((report) => {
+      const payload = report.payload || {};
+      return `${report.client.name || report.client.id}:${report.checksum}` +
+        `/active=${payload.active ?? "?"}` +
+        `/activeTurn=${payload.activeTurnId ?? "?"}` +
+        `/ground=${payload.groundChecksum ?? "?"}` +
+        `/rng=${payload.rngSeed ?? "?"}`;
+    }).join(",");
     endDesyncedGame(room, `turn=${room.turnId} reports=${detail}`);
     return;
   }

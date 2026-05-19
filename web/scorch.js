@@ -45,6 +45,7 @@ const ITEMS = [
   { name: "Battery", price: 4500, bundle: 1, max: 0, type: "battery", power: 100 },
   { name: "Tracer", price: 100, bundle: 1, max: 0, type: "tracer" },
   { name: "Auto Defense", price: 5000, bundle: 1, max: 0, type: "autodefense" },
+  { name: "Interceptor Drone", price: 18000, bundle: 1, max: 0, type: "interceptor", hover: 42, acquire: 90, speed: 8, hitRadius: 7 },
   { name: "Fuel", price: 10000, bundle: 100, max: 1000, type: "fuel" }
 ];
 const PARACHUTE_ICON = [
@@ -70,6 +71,7 @@ const AI_ACCURACY = [5, 4, 2];
 const AI_RADIUS_FACTOR = [3.0, 2.0, 1.5];
 const AI_WEAPON_PRICE_CENTER = [0.12, 0.52, 0.86];
 const AI_WEAPON_PRICE_SPREAD = [0.34, 0.36, 0.28];
+const TRACER_FADE_MS = 300000;
 
 const tankData = [
   [
@@ -167,6 +169,12 @@ class Random {
   }
   pick(values) {
     return values[this.int(values.length)];
+  }
+  peek() {
+    return (((1664525 * this.seed + 1013904223) >>> 0) / 0x100000000);
+  }
+  peekSeed() {
+    return (1664525 * this.seed + 1013904223) >>> 0;
   }
 }
 
@@ -353,6 +361,8 @@ class Player {
     this.falling = false;
     this.tracer = false;
     this.autoDefense = false;
+    this.autoDefensePrepared = false;
+    this.interceptorDrone = null;
   }
   get sprite() { return tankData[this.tankType]; }
   get width() { return this.sprite[0].length; }
@@ -386,6 +396,8 @@ class ScorchGame {
     this.tracerTrails = [];
     this.chatMessages = [];
     this.chatTimer = null;
+    this.droneTimer = null;
+    this.visualRand = new Random();
     this.galslaMode = false;
     this.galslaTimer = null;
     this.statsSnapshot = [];
@@ -411,6 +423,7 @@ class ScorchGame {
     const [width, height] = String(config.resolution || "800x600").split("x").map(Number);
     this.resize(width || 800, height || 600);
     this.rand = new Random(Number(config.seed) >>> 0);
+    this.visualRand = new Random((this.rand.initialSeed ^ 0x9e3779b9) >>> 0);
     const maxWind = Number(config.maxWind);
     const initialCash = Number(config.initialCash);
     this.maxWind = Number.isFinite(maxWind) ? Math.max(0, Math.trunc(maxWind)) : PhysicsMaxWind();
@@ -483,19 +496,42 @@ class ScorchGame {
     }));
   }
   checksum() {
-    let hash = 2166136261;
-    const stride = Math.max(1, Math.floor(this.bitmap.pixels.length / 1024));
-    for (let i = 0; i < this.bitmap.pixels.length; i += stride) {
-      hash ^= this.bitmap.pixels[i];
-      hash = Math.imul(hash, 16777619);
-    }
+    let hash = this.groundChecksumValue();
+    hash ^= this.active;
+    hash = Math.imul(hash, 16777619);
+    hash ^= this.rand.seed >>> 0;
+    hash = Math.imul(hash, 16777619);
     for (const player of this.players) {
       hash ^= player.alive ? 1 : 0;
       hash = Math.imul(hash, 16777619);
       hash ^= (player.x << 16) ^ player.y ^ player.powerLimit;
       hash = Math.imul(hash, 16777619);
+      hash ^= player.shield ? Math.round(player.shield.strength) : 0;
+      hash = Math.imul(hash, 16777619);
+      hash ^= ((player.parachutes || 0) << 8) ^ (player.tracer ? 1 : 0);
+      hash = Math.imul(hash, 16777619);
+      const drone = player.interceptorDrone;
+      hash ^= drone?.active ? 1 : 0;
+      hash = Math.imul(hash, 16777619);
+      if (drone?.active) {
+        hash ^= Math.round(drone.x);
+        hash = Math.imul(hash, 16777619);
+        hash ^= Math.round(drone.y);
+        hash = Math.imul(hash, 16777619);
+      }
     }
     return (hash >>> 0).toString(16).padStart(8, "0");
+  }
+  groundChecksumValue() {
+    let hash = 2166136261;
+    for (let i = 0; i < this.bitmap.pixels.length; i++) {
+      hash ^= this.bitmap.pixels[i];
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+  groundChecksum() {
+    return this.groundChecksumValue().toString(16).padStart(8, "0");
   }
   resize(width, height) {
     WIDTH = width;
@@ -511,6 +547,10 @@ class ScorchGame {
     if (this.roundRestartTimer) {
       clearTimeout(this.roundRestartTimer);
       this.roundRestartTimer = null;
+    }
+    if (this.droneTimer) {
+      clearTimeout(this.droneTimer);
+      this.droneTimer = null;
     }
     this.roundOver = false;
     this.bitmap = new Bitmap(WIDTH, HEIGHT, this.rand);
@@ -528,6 +568,8 @@ class ScorchGame {
       player.kills = 0;
       player.earnedCash = 0;
       player.shield = null;
+      player.interceptorDrone = null;
+      player.autoDefensePrepared = false;
     }
     this.placeTanks();
     this.active = this.players.findIndex((p) => p.alive);
@@ -683,6 +725,7 @@ class ScorchGame {
       this.drawShield(player);
       this.drawParachute(player);
       this.drawTank(player);
+      this.drawInterceptorDrone(player);
     }
     this.drawWind();
     this.drawChatMessages();
@@ -853,6 +896,41 @@ class ScorchGame {
     this.ctx.stroke();
     this.ctx.restore();
   }
+  droneHome(player) {
+    return {
+      x: player.x + Math.floor(player.width / 2),
+      y: Math.max(14, player.y - 42)
+    };
+  }
+  drawInterceptorDrone(player) {
+    const drone = player.interceptorDrone;
+    if (!drone?.active) return;
+    const home = this.droneHome(player);
+    const x = Math.round(drone.x ?? home.x);
+    const y = Math.round(drone.y ?? home.y);
+    this.ctx.save();
+    this.ctx.strokeStyle = "#000";
+    this.ctx.lineWidth = 1;
+    this.ctx.fillStyle = "#66f2ff";
+    this.ctx.beginPath();
+    this.ctx.moveTo(x, y - 4);
+    this.ctx.lineTo(x + 6, y);
+    this.ctx.lineTo(x, y + 4);
+    this.ctx.lineTo(x - 6, y);
+    this.ctx.closePath();
+    this.ctx.stroke();
+    this.ctx.fill();
+    this.ctx.strokeStyle = "#ffff00";
+    this.ctx.beginPath();
+    this.ctx.moveTo(x - 9, y - 1);
+    this.ctx.lineTo(x - 5, y - 1);
+    this.ctx.moveTo(x + 5, y - 1);
+    this.ctx.lineTo(x + 9, y - 1);
+    this.ctx.stroke();
+    this.ctx.fillStyle = "#fff";
+    this.ctx.fillRect(x - 1, y - 1, 2, 2);
+    this.ctx.restore();
+  }
   getTankAt(x, y) {
     return this.players.find((player) => {
       if (!player.alive) return false;
@@ -866,7 +944,7 @@ class ScorchGame {
     this.hoverX = x;
     this.hoverY = y;
     this.hoverPlayer = this.getTankAt(x, y);
-    this.drawWorld();
+    if (!this.animating) this.drawWorld();
   }
   drawTooltip() {
     if (!this.hoverPlayer || !this.hoverPlayer.alive) return;
@@ -933,8 +1011,8 @@ class ScorchGame {
       if (player.items[5] <= 0) player.tracer = false;
     }
     if (weapon.kind === "mirv") {
-      await this.fireMirv(player, weapon, useTracer);
-      this.finishShot("Turn complete.", firedPlayerId);
+      const result = await this.fireMirv(player, weapon, useTracer);
+      this.finishShot(result?.intercepted ? "Missile intercepted." : "Turn complete.", firedPlayerId);
       return;
     }
     if (weapon.kind === "laser") {
@@ -951,9 +1029,9 @@ class ScorchGame {
     let step = 0;
     let prevX = startX;
     let prevY = HEIGHT - startY;
-    const tracerTrail = useTracer ? [[prevX, prevY]] : null;
-    if (tracerTrail) this.tracerTrails.push(tracerTrail);
+    const tracerTrail = useTracer ? this.createTracerTrail(player, [prevX, prevY]) : null;
     let hit = null;
+    let intercepted = null;
     this.render(`${player.name} fires ${weapon.name}.`);
     while (!hit) {
       const x = Math.trunc(startX + (this.wind + vx0) * step * STEP_SIZE);
@@ -966,6 +1044,12 @@ class ScorchGame {
       }
       if (y >= 0 && prevY >= 0 && step > 0) hit = this.intersectShot(prevX, prevY, x, y);
       if (tracerTrail) tracerTrail.push(hit ? [hit.x, hit.y] : [x, y]);
+      intercepted = !hit ? this.updateInterceptorDrones(x, y, player) : null;
+      if (intercepted) {
+        await this.animateInterceptorExplosion(intercepted.x, intercepted.y);
+        this.nextTurn("Missile intercepted.");
+        break;
+      }
       this.drawWorld();
       this.ctx.fillStyle = "#fff";
       this.ctx.fillRect(x - 1, y - 1, 3, 3);
@@ -973,6 +1057,10 @@ class ScorchGame {
       prevY = y;
       step += 2;
       await sleep(18);
+    }
+    if (intercepted) {
+      this.finishShot("Missile intercepted.", firedPlayerId);
+      return;
     }
     if (hit && weapon.kind === "roller") await this.rollAndExplode(hit.x, hit.y, vx0, weapon, player);
     else if (hit && weapon.kind === "napalm") await this.napalm(hit.x, hit.y, weapon, player);
@@ -984,13 +1072,28 @@ class ScorchGame {
     this.finishShot(hit ? "Turn complete." : "Missile left the field.", firedPlayerId);
   }
   drawTracerTrails() {
-    for (const trail of this.tracerTrails) this.drawTracerTrail(trail);
+    const now = Date.now();
+    this.tracerTrails = this.tracerTrails.filter((trail) => now - trail.createdAt < TRACER_FADE_MS);
+    for (const trail of this.tracerTrails) this.drawTracerTrail(trail, now);
   }
-  drawTracerTrail(points) {
+  createTracerTrail(player, startPoint) {
+    const trail = {
+      points: [startPoint],
+      color: playerTankColor(player),
+      createdAt: Date.now()
+    };
+    this.tracerTrails.push(trail);
+    return trail.points;
+  }
+  drawTracerTrail(trail, now = Date.now()) {
+    const points = trail.points ?? trail;
     if (points.length < 2) return;
+    const age = now - (trail.createdAt ?? now);
+    const alpha = Math.max(0.08, 1 - age / TRACER_FADE_MS);
     this.ctx.save();
-    this.ctx.strokeStyle = "#ffff00";
+    this.ctx.strokeStyle = cssColor(trail.color ?? rgb(255, 255, 0));
     this.ctx.lineWidth = 1;
+    this.ctx.globalAlpha = alpha;
     this.ctx.beginPath();
     this.ctx.moveTo(points[0][0] + 0.5, points[0][1] + 0.5);
     for (let i = 1; i < points.length; i++) {
@@ -1005,6 +1108,83 @@ class ScorchGame {
     updateUi(this, "Out of ammo.");
     return false;
   }
+  updateInterceptorDrones(x, y, shooter = null) {
+    for (const player of this.players) {
+      const drone = player.interceptorDrone;
+      if (!player.alive || !drone?.active || player === shooter) continue;
+      const item = ITEMS.find((entry) => entry.type === "interceptor");
+      const home = this.droneHome(player);
+      const dxMissile = x - Math.round(drone.x);
+      const dyMissile = y - Math.round(drone.y);
+      const acquire = item.acquire ?? 90;
+      const chasing = dxMissile * dxMissile + dyMissile * dyMissile <= acquire * acquire;
+      const targetX = chasing ? x : Math.round(home.x + this.wind * 1.8);
+      const targetY = chasing ? y : home.y;
+      const dx = targetX - drone.x;
+      const dy = targetY - drone.y;
+      const distance = Math.hypot(dx, dy);
+      const speed = chasing ? (item.speed ?? 8) : 2.2;
+      if (distance > 0.01) {
+        const step = Math.min(speed, distance);
+        drone.x += dx / distance * step;
+        drone.y += dy / distance * step;
+      }
+      drone.x += this.wind * 0.025;
+      drone.x = Math.round(Math.max(4, Math.min(WIDTH - 5, drone.x)));
+      drone.y = Math.round(Math.max(8, Math.min(HEIGHT - 8, drone.y)));
+      const hitDx = x - drone.x;
+      const hitDy = y - drone.y;
+      const hitRadius = item.hitRadius ?? 7;
+      if (hitDx * hitDx + hitDy * hitDy <= hitRadius * hitRadius) {
+        drone.active = false;
+        player.interceptorDrone = null;
+        return { x: Math.round(drone.x), y: Math.round(drone.y), player };
+      }
+    }
+    return null;
+  }
+  destroyDronesNear(x, y, radius) {
+    const destroyed = [];
+    for (const player of this.players) {
+      const drone = player.interceptorDrone;
+      if (!drone?.active) continue;
+      const blast = Math.max(16, radius * 1.08);
+      if (Math.hypot((drone.x ?? 0) - x, (drone.y ?? 0) - y) > blast) continue;
+      destroyed.push({ x: Math.round(drone.x), y: Math.round(drone.y), player });
+      drone.active = false;
+      player.interceptorDrone = null;
+    }
+    return destroyed;
+  }
+  drawDroneDebris(x, y, frame = 0) {
+    this.ctx.save();
+    this.ctx.strokeStyle = "#66f2ff";
+    this.ctx.fillStyle = "#ffff00";
+    for (let i = 0; i < 5; i++) {
+      const angle = frame * 0.7 + i * 1.3;
+      const len = 4 + frame + i;
+      const px = x + Math.cos(angle) * len;
+      const py = y + Math.sin(angle) * len;
+      this.ctx.fillRect(Math.round(px), Math.round(py), 2, 2);
+    }
+    this.ctx.restore();
+  }
+  async animateInterceptorExplosion(x, y) {
+    beep(110, 0.08);
+    for (let r = 2; r <= 14; r += 3) {
+      this.drawWorld();
+      this.ctx.save();
+      this.ctx.globalAlpha = 0.85;
+      this.ctx.fillStyle = r < 8 ? "#ffff00" : "#ff5a00";
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, r, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.strokeStyle = "#ffffff";
+      this.ctx.stroke();
+      this.ctx.restore();
+      await sleep(22);
+    }
+  }
   async fireMirv(player, weapon, useTracer = false) {
     const startX = player.turretX(2);
     const startY = HEIGHT - player.turretY(2);
@@ -1016,8 +1196,7 @@ class ScorchGame {
     let prevX = startX;
     let prevY = HEIGHT - startY;
     let apex = null;
-    const mainTrail = useTracer ? [[startX, HEIGHT - startY]] : null;
-    if (mainTrail) this.tracerTrails.push(mainTrail);
+    const mainTrail = useTracer ? this.createTracerTrail(player, [startX, HEIGHT - startY]) : null;
     this.render(`${player.name} fires ${weapon.name}.`);
       while (!apex) {
       const x = Math.trunc(startX + (this.wind + vx0) * step * STEP_SIZE);
@@ -1035,6 +1214,13 @@ class ScorchGame {
         await this.explode(hit.x, hit.y, weapon.radius, player, { ...weapon, kind: "simple" });
         return;
       }
+      const intercepted = this.updateInterceptorDrones(x, y, player);
+      if (intercepted) {
+        if (mainTrail) mainTrail.push([x, y]);
+        await this.animateInterceptorExplosion(intercepted.x, intercepted.y);
+        this.nextTurn("Missile intercepted.");
+        return { intercepted: true };
+      }
       if (step > 4 && y > prevY) apex = { x, y, worldY };
       if (mainTrail) mainTrail.push([x, y]);
       this.drawWorld();
@@ -1049,8 +1235,7 @@ class ScorchGame {
     const particles = [];
     let power = vx0 - 5 * weapon.particles / 2;
     for (let i = 0; i < weapon.particles; i++) {
-      const trail = useTracer ? [[apex.x, apex.y]] : null;
-      if (trail) this.tracerTrails.push(trail);
+      const trail = useTracer ? this.createTracerTrail(player, [apex.x, apex.y]) : null;
       particles.push({ startX: apex.x, startY: HEIGHT - apex.y, vx: power, step: 0, done: false, prevX: apex.x, prevY: apex.y, trail });
       power += 5;
     }
@@ -1076,6 +1261,13 @@ class ScorchGame {
           continue;
         }
         const hit = y >= 0 && particle.prevY >= 0 && particle.step > 0 ? this.intersectShot(particle.prevX, particle.prevY, x, y) : null;
+        const intercepted = !hit ? this.updateInterceptorDrones(x, y, player) : null;
+        if (intercepted) {
+          particle.done = true;
+          if (particle.trail) particle.trail.push([x, y]);
+          await this.animateInterceptorExplosion(intercepted.x, intercepted.y);
+          continue;
+        }
         if (hit) {
           particle.done = true;
           if (particle.trail) particle.trail.push([hit.x, hit.y]);
@@ -1379,6 +1571,7 @@ class ScorchGame {
       return x + halfW >= player.x && x - halfW < player.x + player.width &&
         y + halfH >= player.y && y - halfH < player.y + player.height;
     });
+    const recentPositions = [[x, y]];
     for (let ticks = 0; ticks < 520; ticks++) {
       let falling = true;
       for (let i = 0; i < halfW * 2 && falling; i++) {
@@ -1395,6 +1588,14 @@ class ScorchGame {
       } else {
         break;
       }
+      const previous = recentPositions[recentPositions.length - 1];
+      const twoMovesAgo = recentPositions[recentPositions.length - 2];
+      if ((previous && previous[0] === x && previous[1] === y) ||
+          (twoMovesAgo && twoMovesAgo[0] === x && twoMovesAgo[1] === y)) {
+        break;
+      }
+      recentPositions.push([x, y]);
+      if (recentPositions.length > 2) recentPositions.shift();
       if (hitsTank()) break;
       this.drawWorld();
       this.drawRollerSprite(x, y, frame++);
@@ -1502,7 +1703,7 @@ class ScorchGame {
       for (const [sx, sy] of surface) {
         const fx = sx - minX;
         const fy = sy - minY;
-        fireA[fy * fireW + fx] = Math.max(fireA[fy * fireW + fx], energy + this.rand.int(35));
+        fireA[fy * fireW + fx] = Math.max(fireA[fy * fireW + fx], energy + this.visualRand.int(35));
       }
       for (let fy = fireH - 2; fy >= 1; fy--) {
         for (let fx = 1; fx < fireW - 1; fx++) {
@@ -1510,7 +1711,7 @@ class ScorchGame {
           const b1 = fireA[(fy + 1) * fireW + fx - 1];
           const b2 = fireA[(fy + 1) * fireW + fx + 1];
           const same = fireA[fy * fireW + fx];
-          const value = Math.max(0, Math.floor((below + b1 + b2 + same) / 4) - (this.rand.int(5) + 1));
+          const value = Math.max(0, Math.floor((below + b1 + b2 + same) / 4) - (this.visualRand.int(5) + 1));
           fireB[fy * fireW + fx] = value;
         }
       }
@@ -1632,13 +1833,15 @@ class ScorchGame {
   }
   async explode(x, y, radius, shooter, weapon = WEAPONS[this.weapon], completeTurn = true) {
     beep(70, 0.12);
-    if (weapon.kind === "simple") await this.animateSimpleExplosion(x, y, radius);
+    const destroyedDrones = this.destroyDronesNear(x, y, radius);
+    if (weapon.kind === "simple") await this.animateSimpleExplosion(x, y, radius, destroyedDrones);
     else {
       let c = 150;
       const cStep = c / radius;
       for (let r = 0; r < radius; r += 3) {
         this.drawWorld();
         this.drawExplosionFrame(x, y, r, radius, c, weapon);
+        for (const drone of destroyedDrones) this.drawDroneDebris(drone.x, drone.y, Math.floor(r / 3));
         c -= cStep;
         await sleep(24);
       }
@@ -1652,22 +1855,32 @@ class ScorchGame {
     }
     if (completeTurn) this.nextTurn("Explosion complete.");
   }
-  async animateSimpleExplosion(x, y, radius) {
+  async animateSimpleExplosion(x, y, radius, debris = []) {
     let counter = 0;
     let c = 150;
     const cStep = c / radius;
     while (counter < radius) {
-      this.bitmap.setDensity(0.2);
-      this.bitmap.setColor(rgb(255, Math.max(0, Math.trunc(c)), 0));
-      this.bitmap.fillCircle(x, y, counter);
-      this.bitmap.setColor(rgb(255, 255, 0));
-      this.bitmap.drawCircle(x, y, Math.trunc(counter * 0.8));
-      this.bitmap.setColor(DARK_GRAY);
-      this.bitmap.drawCircle(x, y, Math.trunc(counter * 0.5));
-      this.bitmap.setColor(null);
-      this.bitmap.drawCircle(x, y, Math.trunc(counter * 0.3));
-      this.bitmap.setDensity(1);
       this.drawWorld();
+      this.ctx.save();
+      this.ctx.globalAlpha = 0.85;
+      this.ctx.fillStyle = `rgb(255, ${Math.max(0, Math.trunc(c))}, 0)`;
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, counter, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.strokeStyle = "#ffff00";
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, Math.max(1, Math.trunc(counter * 0.8)), 0, Math.PI * 2);
+      this.ctx.stroke();
+      this.ctx.strokeStyle = "#404040";
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, Math.max(1, Math.trunc(counter * 0.5)), 0, Math.PI * 2);
+      this.ctx.stroke();
+      this.ctx.strokeStyle = "#000";
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, Math.max(1, Math.trunc(counter * 0.3)), 0, Math.PI * 2);
+      this.ctx.stroke();
+      this.ctx.restore();
+      for (const drone of debris) this.drawDroneDebris(drone.x, drone.y, Math.floor(counter / 3));
       c -= cStep;
       counter += 3;
       await sleep(40);
@@ -1676,17 +1889,21 @@ class ScorchGame {
     let density = 0.3;
     let rd = 0.2;
     while (rd <= 1) {
-      this.bitmap.setDensity(density);
-      this.bitmap.setColor(rgb(Math.trunc(255 * (1 - rd)), 0, 0));
-      this.bitmap.fillCircle(x, y, radius);
-      this.bitmap.setDensity(1);
       this.drawWorld();
+      this.ctx.save();
+      this.ctx.globalAlpha = Math.max(0.12, 0.55 * (1 - rd));
+      this.ctx.fillStyle = `rgb(${Math.trunc(255 * (1 - rd))}, 0, 0)`;
+      this.ctx.beginPath();
+      this.ctx.arc(x, y, radius, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.restore();
       rd += density;
       await sleep(40);
     }
   }
   async explodeMany(impacts, shooter) {
     beep(70, 0.12);
+    const destroyedDrones = impacts.flatMap((impact) => this.destroyDronesNear(impact.x, impact.y, impact.radius));
     const maxRadius = Math.max(...impacts.map((impact) => impact.radius));
     for (let r = 0; r < maxRadius; r += 3) {
       this.drawWorld();
@@ -1696,6 +1913,7 @@ class ScorchGame {
           this.drawExplosionFrame(impact.x, impact.y, r, impact.radius, c, impact.weapon);
         }
       }
+      for (const drone of destroyedDrones) this.drawDroneDebris(drone.x, drone.y, Math.floor(r / 3));
       await sleep(24);
     }
     const deaths = new Set();
@@ -1797,7 +2015,7 @@ class ScorchGame {
       }
       const generator = width * (height - 4);
       for (let fx = 0; fx < width; fx += 4) {
-        const color = this.rand.int(Math.max(1, Math.floor(255 * intensity)));
+        const color = this.visualRand.int(Math.max(1, Math.floor(255 * intensity)));
         for (let gy = 0; gy < 4; gy++) {
           for (let gx = 0; gx < 4 && fx + gx < width; gx++) {
             fireB[generator + gy * width + fx + gx] = color;
@@ -1932,6 +2150,7 @@ class ScorchGame {
     this.bitmap.setPixel(x, y + 1);
   }
   damagePlayers(x, y, radius, shooter) {
+    this.destroyDronesNear(x, y, radius);
     const deaths = [];
     for (const player of this.players) {
       if (!player.alive) continue;
@@ -2153,6 +2372,7 @@ class ScorchGame {
     if (this.players[this.active] !== player || this.animating || this.roundOver || autoDefenseMode) return;
     this.animating = true;
     setControlsDisabled(true);
+    this.prepareAiDefenses(player);
     const weaponIndex = this.chooseAiWeapon(player);
     const weapon = WEAPONS[weaponIndex];
     const shot = await this.findAiShot(player, weapon);
@@ -2173,6 +2393,34 @@ class ScorchGame {
     if (globalThis.multiplayerSession?.started) globalThis.multiplayerSession.fire();
     else this.fire();
   }
+  prepareAiDefenses(player) {
+    if (!player?.ai || !player.alive) return false;
+    let used = false;
+    const interceptorIndex = ITEMS.findIndex((item) => item.type === "interceptor");
+    if (interceptorIndex >= 0 && !player.interceptorDrone?.active && player.items[interceptorIndex] > 0) {
+      player.items[interceptorIndex]--;
+      const home = this.droneHome(player);
+      player.interceptorDrone = {
+        active: true,
+        x: Math.round(home.x + this.wind * 1.8),
+        y: home.y,
+        age: 0,
+        phase: player.id * 1.7
+      };
+      used = true;
+    }
+    if (!player.shield) {
+      for (const index of [2, 1, 0]) {
+        if (player.items[index] <= 0) continue;
+        const item = ITEMS[index];
+        player.items[index]--;
+        player.shield = { strength: item.strength, maxStrength: item.strength, damage: item.damage, thickness: item.thickness };
+        used = true;
+        break;
+      }
+    }
+    return used;
+  }
   chooseAiWeapon(player) {
     const choices = WEAPONS
       .map((weapon, index) => ({ weapon, index, qty: player.weapons[index] ?? 0 }))
@@ -2192,7 +2440,7 @@ class ScorchGame {
       total += weight;
       return { ...choice, weight };
     });
-    let pick = this.rand.next() * total;
+    let pick = this.aiChoiceNoise(player, choices) * total;
     for (const choice of weighted) {
       pick -= choice.weight;
       if (pick <= 0) return choice.index;
@@ -2259,6 +2507,22 @@ class ScorchGame {
   }
   aiNoise(player, shot, salt) {
     let x = (this.rand.seed ^ (player.id * 374761393) ^ (player.aiType * 668265263) ^ (shot.angle * 2246822519) ^ (shot.power * 3266489917) ^ salt) >>> 0;
+    x ^= x >>> 16;
+    x = Math.imul(x, 2246822507) >>> 0;
+    x ^= x >>> 13;
+    x = Math.imul(x, 3266489909) >>> 0;
+    x ^= x >>> 16;
+    return x / 0x100000000;
+  }
+  aiChoiceNoise(player, choices) {
+    let x = (this.rand.seed ^ (player.id * 374761393) ^ (player.aiType * 668265263) ^ (this.active * 1442695041) ^ (this.wind * 2246822519)) >>> 0;
+    x ^= (player.angle * 3266489917) >>> 0;
+    x ^= (player.power * 668265263) >>> 0;
+    for (const choice of choices) {
+      x ^= Math.imul(choice.index + 1, 2246822507) >>> 0;
+      x ^= Math.imul(Math.max(0, choice.qty) + 1, 3266489909) >>> 0;
+      x = Math.imul(x ^ (x >>> 15), 2246822507) >>> 0;
+    }
     x ^= x >>> 16;
     x = Math.imul(x, 2246822507) >>> 0;
     x ^= x >>> 13;
@@ -2393,6 +2657,10 @@ function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
 
 function cssColor(color) {
   return `rgb(${(color >>> 16) & 255}, ${(color >>> 8) & 255}, ${color & 255})`;
+}
+
+function playerTankColor(player) {
+  return PLAYER_COLORS[player?.id % PLAYER_COLORS.length] ?? TANK_COLOR;
 }
 
 function hexColor(color) {
@@ -2982,6 +3250,10 @@ class MultiplayerSession {
       turnId: message.turnId,
       playerId: message.playerId,
       checksum: this.lastChecksum,
+      active: this.game.active,
+      activeTurnId: this.activeTurnId,
+      groundChecksum: this.game.groundChecksum(),
+      rngSeed: this.game.rand.seed,
       alive: this.game.players.filter((entry) => entry.alive).map((entry) => entry.id),
       stats: this.game.players.map((entry) => ({
         id: entry.id,
@@ -3104,6 +3376,7 @@ class MultiplayerSession {
       this.game.active = Number(message.active ?? this.game.active);
       if (Number.isFinite(Number(message.wind))) this.game.wind = Number(message.wind);
       this.syncRoster(message.players);
+      activateMultiplayerAiAutoDefenseDefaults();
       const active = this.game.players[this.game.active];
       this.game.weapon = preferredWeaponFor(active, this.game.weapon);
       this.status(`Game ${this.room} round ${this.settings.currentRound}/${this.settings.rounds}.`);
@@ -3158,6 +3431,7 @@ class MultiplayerSession {
       this.game.weapon = message.weapon || 0;
       player.lastWeapon = this.game.weapon;
       player.preferredWeapon = this.game.weapon;
+      if (player.ai) this.game.prepareAiDefenses(player);
       document.getElementById("angle").value = String(player.angle);
       document.getElementById("power").value = String(player.power);
       await this.game.fire();
@@ -3216,6 +3490,8 @@ class MultiplayerSession {
     }
     if (message.type === "desync" && this.started) {
       this.syncRoster(message.players);
+      if (Number.isInteger(message.active)) this.game.active = message.active;
+      this.activeTurnId = Number(message.activeTurnId ?? this.activeTurnId);
       this.started = false;
       this.game.roundOver = true;
       this.game.animating = false;
@@ -3314,7 +3590,7 @@ game.canvas.addEventListener("mousemove", (event) => {
 });
 game.canvas.addEventListener("mouseleave", () => {
   game.hoverPlayer = null;
-  game.drawWorld();
+  if (!game.animating) game.drawWorld();
 });
 
 function updateUi(game, message = "") {
@@ -3458,6 +3734,28 @@ function debugBackgroundLines(currentGame) {
   return lines;
 }
 
+function debugDroneLines(currentGame) {
+  const lines = ["Drones:"];
+  let any = false;
+  for (const player of currentGame.players) {
+    const drone = player.interceptorDrone;
+    if (!drone?.active) {
+      lines.push(`  #${player.id} ${player.name}: none`);
+      continue;
+    }
+    any = true;
+    const home = currentGame.droneHome(player);
+    lines.push(
+      `  #${player.id} ${player.name}: ` +
+      `x=${Math.round(drone.x)} y=${Math.round(drone.y)} ` +
+      `raw=${Number(drone.x).toFixed(3)},${Number(drone.y).toFixed(3)} ` +
+      `home=${home.x},${home.y} phase=${Number(drone.phase || 0).toFixed(3)}`
+    );
+  }
+  if (!any) lines.push("  active: none");
+  return lines;
+}
+
 function updateDebugConsole(currentGame = game) {
   const output = document.getElementById("debugOutput");
   if (!output) return;
@@ -3467,17 +3765,24 @@ function updateDebugConsole(currentGame = game) {
     ...debugBackgroundLines(currentGame),
     `Seed: ${currentGame.rand.initialSeed}`,
     `RNG state: ${currentGame.rand.seed}`,
+    `Next RNG seed: ${currentGame.rand.peekSeed()}`,
+    `Next RNG value: ${currentGame.rand.peek().toFixed(9)}`,
+    `Ground checksum: ${currentGame.groundChecksum()}`,
+    `Full checksum: ${currentGame.checksum()}`,
     `Resolution: ${WIDTH}x${HEIGHT}`,
     `Galsla mode: ${currentGame.galslaMode ? "on" : "off"}`,
     `Wind: ${currentGame.wind}`,
     `Round over: ${currentGame.roundOver}`,
     `Animating: ${currentGame.animating}`,
     `Active player: ${active ? `${active.name} #${active.id}` : "none"}`,
+    `Active index: ${currentGame.active}`,
+    `Net activeTurnId: ${globalThis.multiplayerSession?.activeTurnId ?? "n/a"}`,
     `Weapon: ${WEAPONS[currentGame.weapon]?.name ?? "unknown"} (#${currentGame.weapon})`,
     `Tracer trails: ${currentGame.tracerTrails.length}`,
     `Hover: ${currentGame.hoverPlayer ? currentGame.hoverPlayer.name : "none"}`,
     `Multiplayer: ${globalThis.multiplayerSession?.started ? `game=${globalThis.multiplayerSession.room} self=${globalThis.multiplayerSession.playerId} turn=${currentGame.active}` : "offline"}`,
     `Last net checksum: ${globalThis.multiplayerSession?.lastChecksum || "n/a"}`,
+    ...debugDroneLines(currentGame),
     "",
     "Players:"
   ];
@@ -3488,6 +3793,9 @@ function updateDebugConsole(currentGame = game) {
       ` pos=${player.x},${player.y}` +
       ` angle=${player.angle}` +
       ` power=${player.power}/${player.powerLimit}` +
+      ` shield=${player.shield ? Math.round(player.shield.strength) : "none"}` +
+      ` chute=${player.parachutes}` +
+      ` tracer=${player.tracer ? "on" : "off"}` +
       ` kills=${player.kills}` +
       ` cash=${player.cash}`
     );
@@ -3564,6 +3872,7 @@ function inventoryAction(item, index, player, autoDefense = false) {
   if (autoDefense && !autoDefenseEligibleItem(item, index)) return "";
   if (item.type === "battery") return `<button data-use-item="${index}">Install</button>`;
   if (item.type === "shield") return `<button data-use-item="${index}">Activate</button>`;
+  if (item.type === "interceptor") return `<button data-use-item="${index}">${player.interceptorDrone?.active ? "Online" : "Launch"}</button>`;
   if (item.type === "fuel") return autoDefense ? "" : `<span class="shop-row-buttons"><button data-use-item="${index}" data-use-arg="-1">Left</button><button data-use-item="${index}" data-use-arg="1">Right</button></span>`;
   if (item.type === "tracer") return `<button data-use-item="${index}">${player.tracer ? "Stop" : "Use"}</button>`;
   if (item.type === "parachute") return `<button data-use-item="${index}" data-use-arg="${player.parachutes > 0 ? 0 : player.items[index]}">${player.parachutes > 0 ? "Stop" : "Use"}</button>`;
@@ -3583,6 +3892,17 @@ async function applyItemUse(playerId, index, arg = null) {
   } else if (item.type === "shield") {
     player.items[index]--;
     player.shield = { strength: item.strength, maxStrength: item.strength, damage: item.damage, thickness: item.thickness };
+  } else if (item.type === "interceptor") {
+    if (player.interceptorDrone?.active) return false;
+    player.items[index]--;
+    const home = game.droneHome(player);
+    player.interceptorDrone = {
+      active: true,
+      x: Math.round(home.x + game.wind * 1.8),
+      y: home.y,
+      age: 0,
+      phase: player.id * 1.7
+    };
   } else if (item.type === "fuel") {
     const dir = Number(arg) < 0 ? -1 : 1;
     if (player.items[index] <= 0) return false;
@@ -3610,8 +3930,21 @@ async function applyItemUse(playerId, index, arg = null) {
 }
 
 function autoActivateDefaultItems(player) {
-  if (!canUseAutoDefense(player)) return false;
+  if (player.autoDefensePrepared || !canUseAutoDefense(player)) return false;
+  player.autoDefensePrepared = true;
   player.items[6]--;
+  const interceptorIndex = ITEMS.findIndex((item) => item.type === "interceptor");
+  if (interceptorIndex >= 0 && player.items[interceptorIndex] > 0 && !player.interceptorDrone?.active) {
+    player.items[interceptorIndex]--;
+    const home = game.droneHome(player);
+    player.interceptorDrone = {
+      active: true,
+      x: Math.round(home.x + game.wind * 1.8),
+      y: home.y,
+      age: 0,
+      phase: player.id * 1.7
+    };
+  }
   for (const index of [2, 1, 0]) {
     if (player.items[index] <= 0) continue;
     const item = ITEMS[index];
@@ -3634,8 +3967,10 @@ function localAutoDefensePlayers() {
 
 function beginAutoDefensePhase(options = {}) {
   let automaticUse = false;
-  for (const player of game.players) {
-    if (player.ai && autoActivateDefaultItems(player)) automaticUse = true;
+  if (!options.multiplayer) {
+    for (const player of game.players) {
+      if (player.ai && autoActivateDefaultItems(player)) automaticUse = true;
+    }
   }
   autoDefenseQueue = localAutoDefensePlayers();
   if (!autoDefenseQueue.length) {
@@ -3654,8 +3989,18 @@ function openNextAutoDefensePlayer(multiplayerPhase = false) {
     return;
   }
   if (autoDefensePlayer.items[6] > 0) autoDefensePlayer.items[6]--;
+  autoDefensePlayer.autoDefensePrepared = true;
   showInventory(autoDefensePlayer, { autoDefense: true });
   game.render(`${autoDefensePlayer.name} can enable defensive items.`);
+}
+
+function activateMultiplayerAiAutoDefenseDefaults() {
+  if (!multiplayer.started) return false;
+  let used = false;
+  for (const player of game.players) {
+    if (player.ai && autoActivateDefaultItems(player)) used = true;
+  }
+  return used;
 }
 
 function finishAutoDefensePhase(multiplayerPhase = false, hadOpportunity = true) {

@@ -2,3 +2,5 @@ game lifecycle is not clear. when game ends it should disappear from the set of 
 player profiles should persist on the server, you should be able to log in as guest or as a registered user (SAME as original... why do i have to beg to make this port be functionally equivalent?)
 the multiplayer/single player UI flow is confusing
 multiplayer game inventory/shopping seems to be broken? I got no items?? though stuff bought on the first round m.b. worked? what.
+AI aiming - turret jumps around in a weird way
+rollers get stuck
