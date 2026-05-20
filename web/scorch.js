@@ -66,6 +66,11 @@ const UNLIMITED_INVENTORY_AMOUNT = 999;
 var autoDefenseQueue = [];
 var autoDefensePlayer = null;
 var autoDefenseMode = false;
+var mobileAim = null;
+var mobileAimRadar = null;
+var mobileAimPower = null;
+var mobileAimAngle = null;
+var forceMobileAimMode = false;
 const AI_NAMES = ["Shooter", "Cyborg", "Killer"];
 const AI_ACCURACY = [5, 4, 2];
 const AI_RADIUS_FACTOR = [3.0, 2.0, 1.5];
@@ -887,10 +892,11 @@ class ScorchGame {
     const centerY = player.y + player.height / 2;
     const width = player.width + 7 + player.shield.thickness * 2;
     const height = player.height + 7 + player.shield.thickness * 2;
+    const shieldAlpha = Math.max(0, Math.min(1, player.shield.strength / player.shield.maxStrength));
     this.ctx.save();
-    this.ctx.strokeStyle = "#d8d8d8";
+    this.ctx.strokeStyle = "#fff";
     this.ctx.lineWidth = Math.max(1, player.shield.thickness);
-    this.ctx.globalAlpha = 0.8;
+    this.ctx.globalAlpha = shieldAlpha;
     this.ctx.beginPath();
     this.ctx.ellipse(centerX, centerY, width / 2, height / 2, 0, 0, Math.PI * 2);
     this.ctx.stroke();
@@ -3593,6 +3599,85 @@ game.canvas.addEventListener("mouseleave", () => {
   if (!game.animating) game.drawWorld();
 });
 
+mobileAim = document.getElementById("mobileAim");
+mobileAimRadar = document.getElementById("mobileAimRadar");
+mobileAimPower = document.getElementById("mobileAimPower");
+mobileAimAngle = document.getElementById("mobileAimAngle");
+
+function isMobileAimClient() {
+  return forceMobileAimMode || matchMedia("(pointer: coarse)").matches || matchMedia("(max-width: 860px)").matches;
+}
+
+function canShowMobileAim(currentGame = game) {
+  const player = currentGame.players[currentGame.active];
+  if (!isMobileAimClient() || !player?.alive || player.ai || currentGame.animating || currentGame.roundOver || autoDefenseMode) return false;
+  if (document.getElementById("fire").disabled) return false;
+  return !multiplayer.started || multiplayer.isLocalTurn();
+}
+
+function updateMobileAimControl(currentGame = game) {
+  if (!mobileAim || !mobileAimRadar) return;
+  const player = currentGame.players[currentGame.active];
+  const visible = canShowMobileAim(currentGame);
+  mobileAim.classList.toggle("force-mobile-aim", forceMobileAimMode);
+  mobileAim.classList.toggle("hidden", !visible);
+  mobileAim.setAttribute("aria-hidden", visible ? "false" : "true");
+  if (!visible || !player) return;
+  const powerLimit = Math.max(1, player.powerLimit || MAX_POWER);
+  const powerRatio = Math.max(0, Math.min(1, player.power / powerLimit));
+  const angle = Math.max(0, Math.min(180, player.angle));
+  const angleRad = angle * Math.PI / 180;
+  mobileAimRadar.style.setProperty("--aim-dot-x", `${50 + Math.cos(angleRad) * powerRatio * 50}%`);
+  mobileAimRadar.style.setProperty("--aim-dot-y", `${100 - Math.sin(angleRad) * powerRatio * 100}%`);
+  mobileAimPower.textContent = `P ${Math.round(player.power)}`;
+  mobileAimAngle.textContent = `A ${Math.round(player.angle)}`;
+}
+
+function setAimFromRadarPointer(event) {
+  if (!canShowMobileAim()) return;
+  const player = game.players[game.active];
+  const rect = mobileAimRadar.getBoundingClientRect();
+  const dx = (event.clientX - (rect.left + rect.width / 2)) / (rect.width / 2);
+  const dy = (rect.bottom - event.clientY) / rect.height;
+  const angle = Math.max(0, Math.min(180, Math.round(Math.atan2(Math.max(0, dy), dx) * 180 / Math.PI)));
+  const powerRatio = Math.max(0, Math.min(1, Math.hypot(dx, dy)));
+  player.angle = angle;
+  player.power = Math.round(powerRatio * player.powerLimit);
+  document.getElementById("angle").value = String(player.angle);
+  document.getElementById("power").value = String(player.power);
+  game.render();
+  multiplayer.aim(player);
+}
+
+mobileAimRadar.addEventListener("pointerdown", (event) => {
+  if (!canShowMobileAim()) return;
+  event.preventDefault();
+  mobileAimRadar.setPointerCapture(event.pointerId);
+  setAimFromRadarPointer(event);
+});
+
+mobileAimRadar.addEventListener("pointermove", (event) => {
+  if (!mobileAimRadar.hasPointerCapture(event.pointerId)) return;
+  event.preventDefault();
+  setAimFromRadarPointer(event);
+});
+
+mobileAimRadar.addEventListener("pointerup", (event) => {
+  if (mobileAimRadar.hasPointerCapture(event.pointerId)) mobileAimRadar.releasePointerCapture(event.pointerId);
+});
+
+mobileAimRadar.addEventListener("pointercancel", (event) => {
+  if (mobileAimRadar.hasPointerCapture(event.pointerId)) mobileAimRadar.releasePointerCapture(event.pointerId);
+});
+
+window.addEventListener("resize", () => updateMobileAimControl(game));
+
+function toggleMobileAimMode() {
+  forceMobileAimMode = !forceMobileAimMode;
+  updateMobileAimControl(game);
+  game.render(forceMobileAimMode ? "Mobile aim test mode on." : "Mobile aim test mode off.");
+}
+
 function updateUi(game, message = "") {
   syncGameModeUi();
   const activePlayer = game.players[game.active];
@@ -3622,6 +3707,7 @@ function updateUi(game, message = "") {
     </div>`;
   }).join("");
   updateDebugConsole(game);
+  updateMobileAimControl(game);
 }
 
 function roundReadoutText() {
@@ -4169,6 +4255,7 @@ function setControlsDisabled(disabled) {
   for (const id of ["fire", "newRound", "angle", "power", "weaponSelect", "powerUp", "powerDown", "angleUp", "angleDown", "inventory"]) {
     document.getElementById(id).disabled = finalDisabled;
   }
+  updateMobileAimControl(game);
 }
 
 function syncGameModeUi() {
@@ -4219,6 +4306,11 @@ function nudgePower(amount) {
 }
 
 document.getElementById("fire").addEventListener("click", () => {
+  if (multiplayer.started) multiplayer.fire();
+  else game.fire();
+});
+document.getElementById("mobileAimFire").addEventListener("click", () => {
+  if (!canShowMobileAim()) return;
   if (multiplayer.started) multiplayer.fire();
   else game.fire();
 });
@@ -4499,6 +4591,11 @@ document.addEventListener("keydown", (event) => {
   if (isTextEntryTarget(event.target)) return;
   if (event.key === "?" || (event.key === "/" && event.shiftKey)) {
     toggleDebugConsole();
+    event.preventDefault();
+    return;
+  }
+  if (event.key.toLowerCase() === "m" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    toggleMobileAimMode();
     event.preventDefault();
     return;
   }

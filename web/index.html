@@ -14,6 +14,17 @@
         <span id="turnLabel"></span>
       </div>
       <canvas id="field" width="800" height="600" aria-label="Scorched Earth 2000 game field"></canvas>
+      <div class="mobile-aim hidden" id="mobileAim" aria-hidden="true">
+        <div class="mobile-aim-radar" id="mobileAimRadar">
+          <div class="radar-sweep"></div>
+          <button class="mobile-aim-dot" id="mobileAimDot" type="button" aria-label="Adjust angle and power"></button>
+          <div class="mobile-aim-readout">
+            <span id="mobileAimPower">300</span>
+            <span id="mobileAimAngle">30</span>
+          </div>
+        </div>
+        <button class="mobile-aim-fire" id="mobileAimFire" type="button">fire</button>
+      </div>
       <form class="game-chat-form hidden" id="gameChatForm">
         <input id="gameChatInput" maxlength="180" autocomplete="off">
         <button>Say</button>
