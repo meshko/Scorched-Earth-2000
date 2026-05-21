@@ -2613,9 +2613,18 @@ class ScorchGame {
       if (!target.alive) continue;
       const damage = this.roundDamage(target, x, y, radius);
       if (target === shooter) score -= damage * MAX_PLAYERS_PENALTY();
-      else score += damage;
+      else score += damage * this.aiTargetPriority(shooter, target);
     }
     return score;
+  }
+  aiTargetPriority(shooter, target) {
+    if (shooter.aiType !== 2) return 1;
+    const shieldRatio = target.shield
+      ? Math.max(0, Math.min(1, target.shield.strength / target.shield.maxStrength))
+      : 0;
+    const shieldWeakness = 1 - shieldRatio;
+    const interceptorWeakness = target.interceptorDrone?.active ? 0 : 1;
+    return 1 + interceptorWeakness * 0.9 + shieldWeakness * 0.7;
   }
 }
 
