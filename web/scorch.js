@@ -908,6 +908,75 @@ class ScorchGame {
       y: Math.max(14, player.y - 42)
     };
   }
+  dronePointClear(x, y) {
+    const cx = Math.round(x);
+    const cy = Math.round(y);
+    return cx >= 4 && cx < WIDTH - 4 && cy >= 8 && cy < HEIGHT - 8 && this.bitmap.isBackground(cx, cy);
+  }
+  droneLineClear(x1, y1, x2, y2) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy)));
+    for (let i = 1; i <= steps; i++) {
+      const q = i / steps;
+      if (!this.dronePointClear(x1 + dx * q, y1 + dy * q)) return false;
+    }
+    return true;
+  }
+  closestClearDronePoint(x, y, maxRadius = Math.max(WIDTH, HEIGHT)) {
+    const startX = Math.round(Math.max(4, Math.min(WIDTH - 5, x)));
+    const startY = Math.round(Math.max(8, Math.min(HEIGHT - 9, y)));
+    let best = null;
+    let bestDistance = Infinity;
+    const consider = (cx, cy) => {
+      if (!this.dronePointClear(cx, cy)) return;
+      const dx = cx - startX;
+      const dy = cy - startY;
+      const distance = dx * dx + dy * dy;
+      if (distance < bestDistance) {
+        best = { x: cx, y: cy };
+        bestDistance = distance;
+      }
+    };
+    for (let radius = 0; radius <= maxRadius; radius++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        consider(startX + dx, startY - radius);
+        if (radius > 0) consider(startX + dx, startY + radius);
+      }
+      for (let dy = -radius + 1; dy <= radius - 1; dy++) {
+        consider(startX - radius, startY + dy);
+        if (radius > 0) consider(startX + radius, startY + dy);
+      }
+      if (best) return best;
+    }
+    return { x: startX, y: startY };
+  }
+  createInterceptorDrone(player) {
+    const home = this.droneHome(player);
+    const start = this.closestClearDronePoint(home.x + this.wind * 1.8, home.y);
+    player.interceptorDrone = {
+      active: true,
+      x: start.x,
+      y: start.y,
+      age: 0,
+      phase: player.id * 1.7
+    };
+  }
+  moveInterceptorDrone(drone, targetX, targetY, speed) {
+    if (!this.dronePointClear(drone.x, drone.y)) return false;
+    if (!this.droneLineClear(drone.x, drone.y, targetX, targetY)) return false;
+    const dx = targetX - drone.x;
+    const dy = targetY - drone.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance <= 0.01) return true;
+    const step = Math.min(speed, distance);
+    const nextX = drone.x + dx / distance * step;
+    const nextY = drone.y + dy / distance * step;
+    if (!this.droneLineClear(drone.x, drone.y, nextX, nextY)) return false;
+    drone.x = nextX;
+    drone.y = nextY;
+    return true;
+  }
   drawInterceptorDrone(player) {
     const drone = player.interceptorDrone;
     if (!drone?.active) return;
@@ -1119,29 +1188,27 @@ class ScorchGame {
       const drone = player.interceptorDrone;
       if (!player.alive || !drone?.active || player === shooter) continue;
       const item = ITEMS.find((entry) => entry.type === "interceptor");
+      if (!this.dronePointClear(drone.x, drone.y)) continue;
       const home = this.droneHome(player);
       const dxMissile = x - Math.round(drone.x);
       const dyMissile = y - Math.round(drone.y);
       const acquire = item.acquire ?? 90;
-      const chasing = dxMissile * dxMissile + dyMissile * dyMissile <= acquire * acquire;
+      const inAcquireRange = dxMissile * dxMissile + dyMissile * dyMissile <= acquire * acquire;
+      const canSeeMissile = this.dronePointClear(drone.x, drone.y) && this.dronePointClear(x, y) && this.droneLineClear(drone.x, drone.y, x, y);
+      if (inAcquireRange && !canSeeMissile) continue;
+      const chasing = canSeeMissile && inAcquireRange;
       const targetX = chasing ? x : Math.round(home.x + this.wind * 1.8);
       const targetY = chasing ? y : home.y;
-      const dx = targetX - drone.x;
-      const dy = targetY - drone.y;
-      const distance = Math.hypot(dx, dy);
       const speed = chasing ? (item.speed ?? 8) : 2.2;
-      if (distance > 0.01) {
-        const step = Math.min(speed, distance);
-        drone.x += dx / distance * step;
-        drone.y += dy / distance * step;
-      }
-      drone.x += this.wind * 0.025;
+      this.moveInterceptorDrone(drone, targetX, targetY, speed);
+      const windX = drone.x + this.wind * 0.025;
+      if (this.droneLineClear(drone.x, drone.y, windX, drone.y)) drone.x = windX;
       drone.x = Math.round(Math.max(4, Math.min(WIDTH - 5, drone.x)));
       drone.y = Math.round(Math.max(8, Math.min(HEIGHT - 8, drone.y)));
       const hitDx = x - drone.x;
       const hitDy = y - drone.y;
       const hitRadius = item.hitRadius ?? 7;
-      if (hitDx * hitDx + hitDy * hitDy <= hitRadius * hitRadius) {
+      if (canSeeMissile && hitDx * hitDx + hitDy * hitDy <= hitRadius * hitRadius) {
         drone.active = false;
         player.interceptorDrone = null;
         return { x: Math.round(drone.x), y: Math.round(drone.y), player };
@@ -1644,10 +1711,13 @@ class ScorchGame {
     this.bitmap.setPixel(x, seedY - 1);
 
     let used = 1;
-    while (used < budget) {
+    let spreadAttempts = 0;
+    const maxSpreadAttempts = budget * 12;
+    while (used < budget && spreadAttempts++ < maxSpreadAttempts) {
       if (!frontier.length) {
         const edge = this.findNapalmEdge([...cells].map((key) => key.split(",").map(Number)));
         if (!edge) break;
+        if (addCell(edge.x, edge.y)) used++;
         frontier.push(edge);
       }
       for (let i = 0; i < 4 && frontier.length && used < budget; i++) {
@@ -2407,14 +2477,7 @@ class ScorchGame {
     const interceptorIndex = ITEMS.findIndex((item) => item.type === "interceptor");
     if (interceptorIndex >= 0 && !player.interceptorDrone?.active && player.items[interceptorIndex] > 0) {
       player.items[interceptorIndex]--;
-      const home = this.droneHome(player);
-      player.interceptorDrone = {
-        active: true,
-        x: Math.round(home.x + this.wind * 1.8),
-        y: home.y,
-        age: 0,
-        phase: player.id * 1.7
-      };
+      this.createInterceptorDrone(player);
       used = true;
     }
     if (!player.shield) {
@@ -3992,14 +4055,7 @@ async function applyItemUse(playerId, index, arg = null) {
   } else if (item.type === "interceptor") {
     if (player.interceptorDrone?.active) return false;
     player.items[index]--;
-    const home = game.droneHome(player);
-    player.interceptorDrone = {
-      active: true,
-      x: Math.round(home.x + game.wind * 1.8),
-      y: home.y,
-      age: 0,
-      phase: player.id * 1.7
-    };
+    game.createInterceptorDrone(player);
   } else if (item.type === "fuel") {
     const dir = Number(arg) < 0 ? -1 : 1;
     if (player.items[index] <= 0) return false;
@@ -4033,14 +4089,7 @@ function autoActivateDefaultItems(player) {
   const interceptorIndex = ITEMS.findIndex((item) => item.type === "interceptor");
   if (interceptorIndex >= 0 && player.items[interceptorIndex] > 0 && !player.interceptorDrone?.active) {
     player.items[interceptorIndex]--;
-    const home = game.droneHome(player);
-    player.interceptorDrone = {
-      active: true,
-      x: Math.round(home.x + game.wind * 1.8),
-      y: home.y,
-      age: 0,
-      phase: player.id * 1.7
-    };
+    game.createInterceptorDrone(player);
   }
   for (const index of [2, 1, 0]) {
     if (player.items[index] <= 0) continue;
