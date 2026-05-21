@@ -8,6 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../web"
 const port = Number(process.env.PORT || 4174);
 const statsHtmlPath = path.resolve(process.env.SCORCH_STATS_HTML || process.env.STATS_HTML || path.join(root, "stats.html"));
 const AUTO_START_MS = 3 * 60 * 1000;
+const TURN_REPORT_TIMEOUT_MS = 60000;
 const games = new Map();
 const clients = new Set();
 const statsByName = new Map();
@@ -798,7 +799,7 @@ function relayFire(client, payload) {
     const expected = room.clients.map((member) => member.id);
     const missing = expected.filter((id) => !room.turnReports.has(id));
     if (missing.length) endDesyncedGame(room, `turn=${room.turnId} missing_reports=${missing.join(",")}`);
-  }, 20000);
+  }, TURN_REPORT_TIMEOUT_MS);
   log("game.fire", `game=${room.code} turn=${room.turnId} player=${playerId} angle=${payload.angle} power=${payload.power} weapon=${payload.weapon || 0}`);
   broadcast(room, {
     type: "fire",
@@ -820,7 +821,7 @@ function beginTurnReport(room) {
     const expected = room.clients.map((member) => member.id);
     const missing = expected.filter((id) => !room.turnReports.has(id));
     if (missing.length) endDesyncedGame(room, `turn=${room.turnId} missing_reports=${missing.join(",")}`);
-  }, 20000);
+  }, TURN_REPORT_TIMEOUT_MS);
   return room.turnId;
 }
 
@@ -832,7 +833,7 @@ function relayMassKill(client, payload) {
     return;
   }
   if (room.massKillPendingBy) return;
-  if (!room.turnReportTimer && activeAuthorized(room, client, room.active)) {
+  if (!room.turnReportTimer) {
     beginMassKill(room, client);
     return;
   }

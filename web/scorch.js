@@ -1709,7 +1709,9 @@ class ScorchGame {
       for (const [sx, sy] of surface) {
         const fx = sx - minX;
         const fy = sy - minY;
+        if (fx < 0 || fx >= fireW || fy < 0 || fy >= fireH) continue;
         fireA[fy * fireW + fx] = Math.max(fireA[fy * fireW + fx], energy + this.visualRand.int(35));
+        fireB[fy * fireW + fx] = Math.max(fireB[fy * fireW + fx], fireA[fy * fireW + fx]);
       }
       for (let fy = fireH - 2; fy >= 1; fy--) {
         for (let fx = 1; fx < fireW - 1; fx++) {
